@@ -121,9 +121,10 @@ class DbInstanceChildIterator : public InstanceChildIterator
 
  private:
   const dbNetwork* network_;
+  dbModule* module_;
   bool top_;
-  dbSet<dbInst>::iterator iter_;
-  dbSet<dbInst>::iterator end_;
+  dbSet<dbInst>::iterator dbinst_iter_;
+  dbSet<dbInst>::iterator dbinst_iter_end_;
 };
 
 DbInstanceChildIterator::DbInstanceChildIterator(const Instance* instance,
@@ -132,10 +133,18 @@ DbInstanceChildIterator::DbInstanceChildIterator(const Instance* instance,
 {
   dbBlock* block = network->block();
   if (instance == network->topInstance() && block) {
-    dbSet<dbInst> insts = block->getInsts();
     top_ = true;
-    iter_ = insts.begin();
-    end_ = insts.end();
+    module_ = block -> getTopModule();
+    dbSet<dbInst> insts = module_ -> getInsts();
+    dbinst_iter_ = insts.begin();
+    dbinst_iter_end_ = insts.end();
+    top_ =true;
+    //original code
+    /*
+    dbSet<dbInst> insts = block->getInsts();    
+    dbinst_iter_ = insts.begin();
+    dbinst_iter_end_= insts.end();
+    */
   } else {
     top_ = false;
   }
@@ -143,16 +152,18 @@ DbInstanceChildIterator::DbInstanceChildIterator(const Instance* instance,
 
 bool DbInstanceChildIterator::hasNext()
 {
-  return top_ && iter_ != end_;
+  return top_ && dbinst_iter_ != dbinst_iter_end_;
 }
 
 Instance* DbInstanceChildIterator::next()
 {
-  dbInst* child = *iter_;
-  iter_++;
+  dbInst* child = *dbinst_iter_;
+  dbinst_iter_++;
   return network_->dbToSta(child);
 }
 
+
+  
 class DbInstanceNetIterator : public InstanceNetIterator
 {
  public:

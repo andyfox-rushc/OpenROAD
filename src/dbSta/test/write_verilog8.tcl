@@ -6,5 +6,5 @@ read_verilog reg5.v
 link_design reg5
 
 set verilog_file [make_result_file write_verilog8.v]
-write_verilog $verilog_file
+write_verilog -sort $verilog_file
 report_file $verilog_file

@@ -266,6 +266,7 @@ void dbModule::addInst(dbInst* inst)
     _inst->_module_prev = 0;
     module->_insts = _inst->getOID();
   } else {
+    // pre-pend to module instance list
     _dbInst* cur_head = block->_inst_tbl->getPtr(module->_insts);
     _inst->_module_next = module->_insts;
     module->_insts = _inst->getOID();
