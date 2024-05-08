@@ -1937,10 +1937,6 @@ bool definReader::createBlock(const char* file)
   }
 
   defrClear();
-  auto module = _block->getTopModule();
-  if (module->getInsts().reversible() && module->getInsts().orderReversed()) {
-    module->getInsts().reverse();
-  } 
   return true;
   // 1220 return errors() == 0;
 }
