@@ -294,7 +294,8 @@ dbModule* Verilog2db::makeUniqueDbModule(const char* name)
 // Recursively builds odb's dbModule/dbModInst hierarchy corresponding
 // to the sta network rooted at inst.  parent is the dbModule to build
 // the hierarchy under. If null the top module is used.
-
+// If hierarchy_ is set to false, everything goes in the top level module
+  
 void Verilog2db::makeDbModule(
     Instance* inst,
     dbModule* parent,
@@ -303,12 +304,12 @@ void Verilog2db::makeDbModule(
   Cell* cell = network_->cell(inst);
 
   dbModule* module;
-  if (parent == nullptr) {
+  if (parent == nullptr || hierarchy_ == false) {
     module = block_->getTopModule();
   } else {
+    //a hierarchical module
     module = makeUniqueDbModule(network_->name(cell));
     inst_module_vec.emplace_back(inst, parent);
-
     std::string module_inst_name = network_->name(inst);
     size_t last_idx = module_inst_name.find_last_of('/');
     if (last_idx != string::npos) {
@@ -391,9 +392,21 @@ void Verilog2db::makeDbModule(
       }
     }
   }
+
+
+  //reverse the list of instance creation when inserting in a module
+  //This assures order in modules matches order in dbVector
+  std::vector<Instance*> reversed_list;
   InstanceChildIterator* child_iter = network_->childIterator(inst);
   while (child_iter->hasNext()) {
     Instance* child = child_iter->next();
+    reversed_list.push_back(child);
+  }
+  
+  for (std::vector<Instance*>::reverse_iterator rit = reversed_list.rbegin();
+       rit != reversed_list.rend();
+       ++rit){
+    Instance* child = *rit;
     if (network_->isHierarchical(child)) {
       makeDbModule(child, module, inst_module_vec);
     } else {
@@ -420,6 +433,10 @@ void Verilog2db::makeDbModule(
                       network_->name(cell));
         continue;
       }
+      //if we are in non-hierachical mode force everything into top module
+      if (hierarchy_ == false){
+        module =block_->getTopModule();
+      }
       auto db_inst = dbInst::create(block_, master, child_name, false, module);
 
       inst_module_vec.emplace_back(child, module);
@@ -432,10 +449,17 @@ void Verilog2db::makeDbModule(
                       module->getName());
         continue;
       }
+      if (hierarchy_==false){
+        module = block_->getTopModule();
+      }
+      //if we are in non-hierachical mode force everything into top module      
       module->addInst(db_inst);
     }
   }
-  delete child_iter;
+  
+  if (hierarchy_==false)
+    module = block_->getTopModule();
+
   if (module->getChildren().reversible()
       && module->getChildren().orderReversed()) {
     module->getChildren().reverse();

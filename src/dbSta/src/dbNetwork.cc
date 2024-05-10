@@ -43,6 +43,7 @@
 #include "sta/PortDirection.hh"
 #include "utl/Logger.h"
 
+
 namespace sta {
 
 using utl::ORD;
@@ -135,10 +136,47 @@ DbInstanceChildIterator::DbInstanceChildIterator(const Instance* instance,
   if (instance == network->topInstance() && block) {
     top_ = true;
     module_ = block -> getTopModule();
+
     dbSet<dbInst> insts = module_ -> getInsts();
     dbinst_iter_ = insts.begin();
     dbinst_iter_end_ = insts.end();
     top_ =true;
+
+    //compare the module instances iwth the block instances
+    int diff_count=0;
+    {
+      std::vector<dbInst*> module_insts;
+      for (auto i: module_ -> getInsts()){
+        module_insts.push_back(i);
+      }
+      std::vector<dbInst*> block_insts;
+      for (auto j: block -> getInsts()){
+        block_insts.push_back(j);
+      }
+
+      if (module_insts.size() != block_insts.size()){
+        printf("Module inst count %d block inst count %d\n",
+               module_insts.size(),
+               block_insts.size());
+        //       printf("%s Bad sized module/block",0x23);
+      }
+      
+      for (int ix=0; ix < module_insts.size(); ix++){
+        if (module_insts.at(ix) -> getId() != block_insts.at(ix) -> getId()){
+          printf("Difference in block ix at %d Id %d not same as Id %d\n",
+                 ix,
+                 module_insts.at(ix) -> getId(),
+                 block_insts.at(ix) -> getId()
+                 );
+          diff_count++;
+        }
+      }
+      if (diff_count !=0){
+        printf(" Found diffs in block_insts and moudle_insts\n"/*,0x23*/);
+
+      }
+    }
+    
     //original code
     /*
     dbSet<dbInst> insts = block->getInsts();    
