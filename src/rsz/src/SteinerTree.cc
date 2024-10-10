@@ -65,9 +65,36 @@ static void connectedPins(const Net* net,
 SteinerTree* Resizer::makeSteinerTree(const Pin* drvr_pin)
 {
   Network* sdc_network = network_->sdcNetwork();
+
+  //
+  // Handle hierarchy.
+  //
+  odb::dbITerm* iterm;
+  odb::dbBTerm* bterm;
+  odb::dbModITerm* moditerm;
+  odb::dbModBTerm* modbterm;
+
+  db_network_->staToDb(drvr_pin, iterm, bterm, moditerm, modbterm);
+  if (moditerm || modbterm) {
+    printf("How exciting: building a steiner tree in hierarchy !\n");
+  }
+
+  odb::dbNet* db_net;
+  odb::dbModNet* db_mod_net;
+  db_network_->net(drvr_pin, db_net, db_mod_net);
+
+  /*
   Net* net = network_->isTopLevelPort(drvr_pin)
                  ? network_->net(network_->term(drvr_pin))
                  : network_->net(drvr_pin);
+  */
+
+  // force the use of the db net for traversal for steiner tree construction
+  // take the low road and avoid modnets...
+  Net* net = network_->isTopLevelPort(drvr_pin)
+                 ? network_->net(network_->term(drvr_pin))
+                 : db_network_->dbToSta(db_net);
+
   debugPrint(logger_, RSZ, "steiner", 1, "Net {}", sdc_network->pathName(net));
   SteinerTree* tree = new SteinerTree(drvr_pin, this);
   Vector<PinLoc>& pinlocs = tree->pinlocs();

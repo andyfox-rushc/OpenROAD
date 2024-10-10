@@ -53,6 +53,7 @@ namespace rsz {
 class Resizer;
 class RemoveBuffer;
 
+using odb::dbModNet;
 using odb::Point;
 using std::pair;
 using std::vector;
@@ -207,7 +208,11 @@ class RepairSetup : public sta::dbStaState
 
   int rebuffer(const Pin* drvr_pin);
   BufferedNetSeq rebufferBottomUp(const BufferedNetPtr& bnet, int level);
-  int rebufferTopDown(const BufferedNetPtr& choice, Net* net, int level);
+  int rebufferTopDown(const BufferedNetPtr& choice,
+                      Net* net,
+                      int level,
+                      Instance* parent,
+                      dbModNet* modnet);
   BufferedNetSeq addWireAndBuffer(const BufferedNetSeq& Z,
                                   const BufferedNetPtr& bnet_wire,
                                   int level);

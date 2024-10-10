@@ -8003,6 +8003,7 @@ class dbModITerm : public dbObject
   void disconnect();
   static dbModITerm* create(dbModInst* parentInstance, const char* name);
   static void destroy(dbModITerm*);
+  static dbModITerm* getModITerm(dbBlock* block_, uint dbid_);    
   // User Code End dbModITerm
 };
 
@@ -8020,6 +8021,7 @@ class dbModNet : public dbObject
   const char* getName() const;
   static dbModNet* create(dbModule* parentModule, const char* name);
   static void destroy(dbModNet*);
+  static dbModNet* getModNet(dbBlock* block_, uint dbid_);  
   // User Code End dbModNet
 };
 

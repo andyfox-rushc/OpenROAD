@@ -52,6 +52,12 @@ using std::make_shared;
 
 using utl::RSZ;
 
+using odb::dbBTerm;
+using odb::dbITerm;
+using odb::dbModBTerm;
+using odb::dbModITerm;
+using odb::dbModNet;
+
 using sta::fuzzyGreater;
 using sta::fuzzyGreaterEqual;
 using sta::fuzzyLess;
@@ -66,6 +72,13 @@ int RepairSetup::rebuffer(const Pin* drvr_pin)
 {
   int inserted_buffer_count = 0;
   Net* net;
+
+  // Hierarchy. Get the parent instance of the drvr pin here
+  Instance* parent
+      = db_network_->getOwningInstanceParent(const_cast<Pin*>(drvr_pin));
+  dbNet* db_net = nullptr;
+  dbModNet* db_modnet = nullptr;
+  printf("Rebuffering from pin %s\n", db_network_->name(drvr_pin));
   if (network_->isTopLevelPort(drvr_pin)) {
     net = network_->net(network_->term(drvr_pin));
     LibertyCell* buffer_cell = resizer_->buffer_lowest_drive_;
@@ -73,6 +86,16 @@ int RepairSetup::rebuffer(const Pin* drvr_pin)
     LibertyPort* input;
     buffer_cell->bufferPorts(input, drvr_port_);
   } else {
+    // get modnet here
+    // keep both nets
+    // annotate parent from drvr pin
+
+    db_network_->net(drvr_pin, db_net, db_modnet);
+    if (db_modnet) {
+      printf("Rebuffering from a mod net\n");
+    }
+    (void) db_net;
+
     net = network_->net(drvr_pin);
     drvr_port_ = network_->libertyPort(drvr_pin);
   }
@@ -116,7 +139,9 @@ int RepairSetup::rebuffer(const Pin* drvr_pin)
       }
       if (best_option) {
         debugPrint(logger_, RSZ, "rebuffer", 2, "best option {}", best_index);
-        inserted_buffer_count = rebufferTopDown(best_option, net, 1);
+        // note we pass down the db_net, not the db modnet
+        inserted_buffer_count = rebufferTopDown(
+            best_option, db_network_->dbToSta(db_net), 1, parent, db_modnet);
         if (inserted_buffer_count > 0) {
           rebuffer_net_count_++;
           debugPrint(logger_,
@@ -437,13 +462,18 @@ float RepairSetup::bufferInputCapacitance(LibertyCell* buffer_cell,
 
 int RepairSetup::rebufferTopDown(const BufferedNetPtr& choice,
                                  Net* net,
-                                 int level)
+                                 int level,
+                                 Instance* parent,
+                                 dbModNet* modnet)
 {
   switch (choice->type()) {
     case BufferedNetType::buffer: {
-      Instance* parent = db_network_->topInstance();
+      //      Instance* parent = db_network_->topInstance();
       string buffer_name = resizer_->makeUniqueInstName("rebuffer");
-      Net* net2 = resizer_->makeUniqueNet();
+      //      Net* net2 = resizer_->makeUniqueNet();
+      std::string net_name = resizer_->makeUniqueNetName();
+      Net* net2 = db_network_->makeNet(net_name.c_str(), parent);
+
       LibertyCell* buffer_cell = choice->bufferCell();
       Instance* buffer = resizer_->makeBuffer(
           buffer_cell, buffer_name.c_str(), parent, choice->location());
@@ -462,26 +492,63 @@ int RepairSetup::rebufferTopDown(const BufferedNetPtr& choice,
                  buffer_cell->name(),
                  sdc_network_->pathName(net2));
       sta_->connectPin(buffer, input, net);
+
+      if (modnet) {
+        // get the buffer iterm
+        Pin* ip_pin;
+        Pin* op_pin;
+        resizer_->getBufferPins(buffer, ip_pin, op_pin);
+        (void) op_pin;
+        odb::dbITerm* iterm;
+        odb::dbBTerm* bterm;
+        odb::dbModITerm* moditerm;
+        odb::dbModBTerm* modbterm;
+        db_network_->staToDb(ip_pin, iterm, bterm, moditerm, modbterm);
+        if (iterm) {
+          iterm->connect(modnet);
+        }
+      }
+
       sta_->connectPin(buffer, output, net2);
-      int buffer_count = rebufferTopDown(choice->ref(), net2, level + 1);
+      int buffer_count
+          = rebufferTopDown(choice->ref(), net2, level + 1, parent, modnet);
+      //
+      //
       resizer_->parasiticsInvalid(net);
       resizer_->parasiticsInvalid(net2);
       return buffer_count + 1;
     }
     case BufferedNetType::wire:
       debugPrint(logger_, RSZ, "rebuffer", 3, "{:{}s}wire", "", level);
-      return rebufferTopDown(choice->ref(), net, level + 1);
+      return rebufferTopDown(choice->ref(), net, level + 1, parent, modnet);
     case BufferedNetType::junction: {
       debugPrint(logger_, RSZ, "rebuffer", 3, "{:{}s}junction", "", level);
-      return rebufferTopDown(choice->ref(), net, level + 1)
-             + rebufferTopDown(choice->ref2(), net, level + 1);
+      return rebufferTopDown(choice->ref(), net, level + 1, parent, modnet)
+             + rebufferTopDown(choice->ref2(), net, level + 1, parent, modnet);
     }
     case BufferedNetType::load: {
       const Pin* load_pin = choice->loadPin();
+
+      // get the modnet from load pin too.
+      dbNet* db_load_net;
+      dbModNet* db_mod_load_net;
+      db_network_->net(load_pin, db_load_net, db_mod_load_net);
+      (void) db_load_net;
+
       Net* load_net = network_->net(load_pin);
       if (load_net != net) {
         Instance* load_inst = db_network_->instance(load_pin);
         Port* load_port = db_network_->port(load_pin);
+
+        // get the iterm for the load port so we can hook up the modnet as
+        // needed.
+        dbITerm* load_iterm = nullptr;
+        dbBTerm* load_bterm = nullptr;
+        dbModITerm* load_moditerm = nullptr;
+        dbModBTerm* load_modbterm = nullptr;
+        db_network_->staToDb(
+            load_pin, load_iterm, load_bterm, load_moditerm, load_modbterm);
+
         debugPrint(logger_,
                    RSZ,
                    "rebuffer",
@@ -492,8 +559,15 @@ int RepairSetup::rebufferTopDown(const BufferedNetPtr& choice,
                    sdc_network_->pathName(load_pin),
                    sdc_network_->pathName(net));
         sta_->disconnectPin(const_cast<Pin*>(load_pin));
-        sta_->connectPin(load_inst, load_port, net);
-        resizer_->parasiticsInvalid(load_net);
+        // connect the low level dbloadnet to the port
+        sta_->connectPin(
+            load_inst, load_port, db_network_->dbToSta(db_load_net));
+        // connect the load modnet
+        if (load_iterm && db_mod_load_net) {
+          load_iterm->connect(db_mod_load_net);
+        }
+        // parasitics invalid on the db net
+        resizer_->parasiticsInvalid(db_load_net);
       }
       return 0;
     }

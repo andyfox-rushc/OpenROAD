@@ -227,6 +227,14 @@ const char* dbModNet::getName() const
   return obj->_name;
 }
 
+dbModNet* dbModNet::getModNet(dbBlock* block, uint db_id)
+{
+  if (db_id == 0) {
+    return nullptr;
+  }
+  return (dbModNet*) (((_dbBlock*) block)->_modnet_tbl->getPtr(db_id));
+}
+
 dbModNet* dbModNet::create(dbModule* parentModule, const char* name)
 {
   // give illusion of scoping.

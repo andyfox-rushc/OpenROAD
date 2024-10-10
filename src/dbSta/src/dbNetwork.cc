@@ -1967,6 +1967,11 @@ void dbNetwork::disconnectPin(Pin* pin)
   } else if (bterm) {
     bterm->disconnect();
   }
+  if (moditerm) {
+    moditerm->disconnect();
+  } else if (modbterm) {
+    modbterm->disconnect();
+  }
 }
 
 void dbNetwork::disconnectPinBefore(const Pin* pin)

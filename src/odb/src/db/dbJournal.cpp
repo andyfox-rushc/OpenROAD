@@ -326,13 +326,20 @@ void dbJournal::redo_createObject()
       uint lib_id;
       uint master_id;
       uint inst_id;
+      uint module_id;  // shouldn't these be dbId<X> ?
       std::string name;
       _log.pop(lib_id);
       _log.pop(master_id);
       _log.pop(name);
       _log.pop(inst_id);
+      _log.pop(module_id);
+
       dbLib* lib = dbLib::getLib(_block->getDb(), lib_id);
       dbMaster* master = dbMaster::getMaster(lib, master_id);
+      dbModule* target_module = (module_id == 0U)
+                                    ? nullptr
+                                    : dbModule::getModule(_block, module_id);
+
       debugPrint(_logger,
                  utl::ODB,
                  "DB_ECO",
@@ -341,7 +348,7 @@ void dbJournal::redo_createObject()
                  name,
                  master_id,
                  lib_id);
-      dbInst::create(_block, master, name.c_str());
+      dbInst::create(_block, master, name.c_str(), false, target_module);
       break;
     }
 
@@ -623,6 +630,22 @@ void dbJournal::redo_disconnectObject()
                  "REDO ECO: disconnect dbITermObj, iterm_id {}",
                  iterm_id);
       iterm->disconnect();
+      break;
+    }
+
+    case dbModITermObj: {
+      uint moditerm_id;
+      _log.pop(moditerm_id);
+      dbModITerm* moditerm = dbModITerm::getModITerm(_block, moditerm_id);
+      uint net_id;
+      _log.pop(net_id);
+      debugPrint(_logger,
+                 utl::ODB,
+                 "DB_ECO",
+                 2,
+                 "REDO ECO: disconnect dbModITermObj, iterm_id {}",
+                 moditerm_id);
+      moditerm->disconnect();
       break;
     }
 
@@ -1474,6 +1497,7 @@ void dbJournal::undo_createObject()
       break;
     }
     case dbInstObj: {
+      printf("Undo create dbInst object\n");
       uint lib_id;
       uint master_id;
       uint inst_id;
@@ -1535,6 +1559,7 @@ void dbJournal::undo_deleteObject()
       break;
     }
     case dbInstObj: {
+      printf("Undo delete dbInst object\n");
       uint lib_id;
       uint master_id;
       uint inst_id;
@@ -1602,6 +1627,7 @@ void dbJournal::undo_deleteObject()
 void dbJournal::undo_connectObject()
 {
   auto obj_type = popObjectType();
+  printf("1 Undoing connected object\n");
 
   switch (obj_type) {
     case dbITermObj: {
@@ -1624,6 +1650,16 @@ void dbJournal::undo_connectObject()
       break;
     }
 
+    case dbModITermObj: {
+      uint moditerm_id;
+      _log.pop(moditerm_id);
+      dbModITerm* moditerm = dbModITerm::getModITerm(_block, moditerm_id);
+      uint net_id;
+      _log.pop(net_id);
+      moditerm->disconnect();
+      break;
+    }
+
     default: {
       _logger->critical(utl::ODB,
                         442,
@@ -1638,6 +1674,8 @@ void dbJournal::undo_disconnectObject()
 {
   auto obj_type = popObjectType();
 
+  printf("undo disconnect\n");
+
   switch (obj_type) {
     case dbITermObj: {
       uint iterm_id;
@@ -1647,6 +1685,12 @@ void dbJournal::undo_disconnectObject()
       _log.pop(net_id);
       dbNet* net = dbNet::getNet(_block, net_id);
       iterm->connect(net);
+      uint mnet_id;
+      _log.pop(mnet_id);
+      dbModNet* modnet = dbModNet::getModNet(_block, mnet_id);
+      if (modnet) {
+        iterm->connect(modnet);
+      }
       break;
     }
 
@@ -1660,6 +1704,25 @@ void dbJournal::undo_disconnectObject()
       bterm->connect(net);
       break;
     }
+
+    case dbModITermObj: {
+      printf("mod term\n");
+      uint moditerm_id;
+      _log.pop(moditerm_id);
+      dbModITerm* moditerm = dbModITerm::getModITerm(_block, moditerm_id);
+      uint mnet_id;
+      _log.pop(mnet_id);
+      dbModNet* modnet = dbModNet::getModNet(_block, mnet_id);
+      debugPrint(_logger,
+                 utl::ODB,
+                 "DB_ECO",
+                 2,
+                 "REDO ECO: disconnect dbModITermObj, iterm_id {}",
+                 moditerm_id);
+      moditerm->connect(modnet);
+      break;
+    }
+
     default: {
       _logger->critical(utl::ODB,
                         443,

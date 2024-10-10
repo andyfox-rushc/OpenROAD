@@ -1439,9 +1439,10 @@ dbInst* dbInst::create(dbBlock* block_,
     block->_journal->pushParam(lib->getId());
     block->_journal->pushParam(master_->getId());
     block->_journal->pushParam(name_);
+    block->_journal->pushParam(inst->getOID());
     // need to add dbModNet
     // dbModule (scope)
-    block->_journal->pushParam(inst->getOID());
+    block->_journal->pushParam(parent_module ? parent_module->getId() : 0);
     block->_journal->endAction();
   }
 

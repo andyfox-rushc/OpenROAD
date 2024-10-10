@@ -552,6 +552,7 @@ void dbITerm::disconnect()
     block->_journal->pushParam(dbITermObj);
     block->_journal->pushParam(getId());
     block->_journal->pushParam(net->getOID());
+    block->_journal->pushParam(iterm->_mnet);
     block->_journal->endAction();
   }
 

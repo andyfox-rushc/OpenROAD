@@ -30,14 +30,15 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 
-// Generator Code Begin Cpp
-#include "dbModITerm.h"
+#include "dbJournal.h"
 
+// Generator Code Begin Cpp
 #include "dbBlock.h"
 #include "dbDatabase.h"
 #include "dbDiff.hpp"
 #include "dbHashTable.hpp"
 #include "dbModBTerm.h"
+#include "dbModITerm.h"
 #include "dbModInst.h"
 #include "dbModNet.h"
 #include "dbTable.h"
@@ -228,6 +229,14 @@ dbModInst* dbModITerm::getParent() const
 
 // User Code Begin dbModITermPublicMethods
 
+dbModITerm* dbModITerm::getModITerm(dbBlock* block, uint db_id)
+{
+  if (db_id == 0) {
+    return nullptr;
+  }
+  return (dbModITerm*) (((_dbBlock*) block)->_moditerm_tbl->getPtr(db_id));
+}
+
 void dbModITerm::setModNet(dbModNet* modNet)
 {
   _dbModITerm* obj = (_dbModITerm*) this;
@@ -296,6 +305,22 @@ void dbModITerm::connect(dbModNet* net)
     return;
   }
   _moditerm->_mod_net = _modnet->getId();
+
+  if (_block->_journal) {
+    debugPrint(_moditerm->getImpl()->getLogger(),
+               utl::ODB,
+               "DB_ECO",
+               1,
+               "ECO: connect ModIterm {} to net {}",
+               getId(),
+               _modnet->getId());
+    _block->_journal->beginAction(dbJournal::CONNECT_OBJECT);
+    _block->_journal->pushParam(dbModITermObj);
+    _block->_journal->pushParam(getId());
+    _block->_journal->pushParam(_modnet->getId());
+    _block->_journal->endAction();
+  }
+
   // append to net moditerms
   if (_modnet->_moditerms != 0) {
     _dbModITerm* head = _block->_moditerm_tbl->getPtr(_modnet->_moditerms);
@@ -318,6 +343,22 @@ void dbModITerm::disconnect()
     return;
   }
   _dbModNet* _modnet = _block->_modnet_tbl->getPtr(_moditerm->_mod_net);
+
+  if (_block->_journal) {
+    debugPrint(_moditerm->getImpl()->getLogger(),
+               utl::ODB,
+               "DB_ECO",
+               1,
+               "ECO: disconnect ModIterm {} to net {}",
+               getId(),
+               _modnet->getId());
+    _block->_journal->beginAction(dbJournal::DISCONNECT_OBJECT);
+    _block->_journal->pushParam(dbModITermObj);
+    _block->_journal->pushParam(getId());
+    _block->_journal->pushParam(_modnet->getId());
+    _block->_journal->endAction();
+  }
+
   _moditerm->_mod_net = 0;
   _dbModITerm* next_moditerm
       = (_moditerm->_next_net_moditerm != 0)

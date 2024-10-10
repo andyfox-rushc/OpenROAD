@@ -631,6 +631,18 @@ void Resizer::getPins(Instance* inst, PinVector& pins) const
 Instance* Resizer::bufferInput(const Pin* top_pin, LibertyCell* buffer_cell)
 {
   Term* term = db_network_->term(top_pin);
+
+  // hiearchy support
+  odb::dbITerm* iterm = nullptr;
+  odb::dbBTerm* bterm = nullptr;
+  odb::dbModBTerm* modbterm = nullptr;
+  odb::dbModITerm* moditerm = nullptr;
+  // is this hooked to a hiearchical net
+  db_network_->staToDb(term, iterm, bterm, moditerm, modbterm);
+  if (moditerm || modbterm) {
+    printf("Buffer hooked to hierarchical net\n");
+  }
+
   Net* input_net = db_network_->net(term);
   LibertyPort *input, *output;
   buffer_cell->bufferPorts(input, output);
@@ -1260,8 +1272,11 @@ bool Resizer::replaceCell(Instance* inst,
       InstancePinIterator* pin_iter = network_->pinIterator(inst);
       while (pin_iter->hasNext()) {
         const Pin* pin = pin_iter->next();
-        const Net* net = network_->net(pin);
-        invalidateParasitics(pin, net);
+        // only invalid dbNets..
+        dbNet* db_net;
+        dbModNet* db_mod_net;
+        db_network_->net(pin, db_net, db_mod_net);
+        invalidateParasitics(pin, db_network_->dbToSta(db_net));
       }
       delete pin_iter;
     }

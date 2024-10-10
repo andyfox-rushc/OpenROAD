@@ -340,6 +340,12 @@ void Resizer::updateParasitics(bool save_guides)
   switch (parasitics_src_) {
     case ParasiticsSrc::placement:
       for (const Net* net : parasitics_invalid_) {
+        odb::dbNet* db_net;
+        odb::dbModNet* db_mod_net;
+        db_network_->staToDb(net, db_net, db_mod_net);
+        if (db_mod_net) {
+          printf("How exciting updating parasitics for a modnet..!\n");
+        }
         estimateWireParasitic(net);
       }
       parasitics_invalid_.clear();
@@ -743,6 +749,16 @@ bool Resizer::isPad(const Instance* inst) const
 
 void Resizer::parasiticsInvalid(const Net* net)
 {
+  static int debug;
+  debug++;
+  printf("D %d Inserting parastics invalid 2\n", debug);
+  odb::dbNet* db_net;
+  odb::dbModNet* db_mod_net;
+  db_network_->staToDb(net, db_net, db_mod_net);
+  if (db_mod_net) {
+    printf("How exciting updating parasitics for a modnet..!\n");
+  }
+
   if (haveEstimatedParasitics()) {
     debugPrint(logger_,
                RSZ,
@@ -756,6 +772,9 @@ void Resizer::parasiticsInvalid(const Net* net)
 
 void Resizer::parasiticsInvalid(const dbNet* net)
 {
+  static int debug;
+  debug++;
+  printf("D %d Inserting parastics invalid\n", debug);
   parasiticsInvalid(db_network_->dbToSta(net));
 }
 
