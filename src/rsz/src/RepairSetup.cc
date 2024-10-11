@@ -1317,6 +1317,8 @@ void RepairSetup::splitLoads(const PathRef* drvr_path,
                              PathExpanded* expanded)
 {
   Pin* drvr_pin = drvr_path->pin(this);
+  printf("Splitting load from driver %s\n", network_ -> name(drvr_pin));
+  
   const PathRef* load_path = expanded->path(drvr_index + 1);
   Vertex* load_vertex = load_path->vertex(sta_);
   Pin* load_pin = load_vertex->pin();
@@ -1366,8 +1368,12 @@ void RepairSetup::splitLoads(const PathRef* drvr_path,
   // H-fix get both the mod net and db net (if present).
   dbNet* db_drvr_net;
   dbModNet* db_mod_drvr_net;
-  db_network_->net(load_pin, db_drvr_net, db_mod_drvr_net);
+  db_network_->net(drvr_pin, db_drvr_net, db_mod_drvr_net);
 
+  if (db_mod_drvr_net){
+    printf("Splitting a mod net load\n");
+  }
+  
   const string buffer_name = resizer_->makeUniqueInstName("split");
 
   // H-Fix Use driver parent for hierarchy, not the top instance
