@@ -472,6 +472,8 @@ int RepairSetup::rebufferTopDown(const BufferedNetPtr& choice,
       string buffer_name = resizer_->makeUniqueInstName("rebuffer");
       //      Net* net2 = resizer_->makeUniqueNet();
       std::string net_name = resizer_->makeUniqueNetName();
+
+      //op nt
       Net* net2 = db_network_->makeNet(net_name.c_str(), parent);
 
       LibertyCell* buffer_cell = choice->bufferCell();
@@ -492,28 +494,11 @@ int RepairSetup::rebufferTopDown(const BufferedNetPtr& choice,
                  buffer_cell->name(),
                  sdc_network_->pathName(net2));
       sta_->connectPin(buffer, input, net);
+      sta_->connectPin(buffer, output, net2);      
 
-      if (modnet) {
-        // get the buffer iterm
-        Pin* ip_pin;
-        Pin* op_pin;
-        resizer_->getBufferPins(buffer, ip_pin, op_pin);
-        (void) op_pin;
-        odb::dbITerm* iterm;
-        odb::dbBTerm* bterm;
-        odb::dbModITerm* moditerm;
-        odb::dbModBTerm* modbterm;
-        db_network_->staToDb(ip_pin, iterm, bterm, moditerm, modbterm);
-        if (iterm) {
-          iterm->connect(modnet);
-        }
-      }
-
-      sta_->connectPin(buffer, output, net2);
       int buffer_count
           = rebufferTopDown(choice->ref(), net2, level + 1, parent, modnet);
-      //
-      //
+
       resizer_->parasiticsInvalid(net);
       resizer_->parasiticsInvalid(net2);
       return buffer_count + 1;
@@ -521,7 +506,8 @@ int RepairSetup::rebufferTopDown(const BufferedNetPtr& choice,
     case BufferedNetType::wire:
       debugPrint(logger_, RSZ, "rebuffer", 3, "{:{}s}wire", "", level);
       return rebufferTopDown(choice->ref(), net, level + 1, parent, modnet);
-    case BufferedNetType::junction: {
+
+  case BufferedNetType::junction: {
       debugPrint(logger_, RSZ, "rebuffer", 3, "{:{}s}junction", "", level);
       return rebufferTopDown(choice->ref(), net, level + 1, parent, modnet)
              + rebufferTopDown(choice->ref2(), net, level + 1, parent, modnet);

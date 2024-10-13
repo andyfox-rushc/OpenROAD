@@ -763,6 +763,9 @@ dbModNet* Verilog2db::constructModNet(Net* inst_pin_net, dbModule* module)
     } else if (mod_bterm) {
       mod_bterm->connect(db_mod_net);
     } else if (mod_iterm) {
+      printf("Connecting mod iterm %s to mod net %s\n",
+             mod_iterm -> getName(),
+             db_mod_net -> getName());
       mod_iterm->connect(db_mod_net);
     }
   }

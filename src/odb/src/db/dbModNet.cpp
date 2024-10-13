@@ -243,6 +243,9 @@ dbModNet* dbModNet::create(dbModule* parentModule, const char* name)
   _dbModNet* modnet = block->_modnet_tbl->create();
   // defaults
   modnet->_name = strdup(name);
+  static int debug;
+  debug++;
+  printf("Making mod net %s\n",name);
   modnet->_parent = parent->getOID();  // dbmodule
   modnet->_next_entry = parent->_modnets;
   modnet->_prev_entry = 0;

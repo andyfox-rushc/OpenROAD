@@ -583,6 +583,8 @@ bool RepairSetup::repairPath(PathRef& path,
                      rebuffer_count);
           inserted_buffer_count_ += rebuffer_count;
           changed = true;
+          //hack...
+          return true;
           break;
         }
       }
@@ -600,7 +602,7 @@ bool RepairSetup::repairPath(PathRef& path,
 
       if (!skip_buffering) {
         // Don't split loads on low fanout nets.
-        if (fanout > split_load_min_fanout_ && !tristate_drvr
+        if (fanout > /*split_load_min_fanout_*/ 1000 && !tristate_drvr
             && !resizer_->dontTouch(net) && !db_net->isConnectedByAbutment()) {
           const int init_buffer_count = inserted_buffer_count_;
           splitLoads(drvr_path, drvr_index, path_slack, &expanded);
@@ -1316,8 +1318,10 @@ void RepairSetup::splitLoads(const PathRef* drvr_path,
                              const Slack drvr_slack,
                              PathExpanded* expanded)
 {
+  static int debug;
+  debug++;
   Pin* drvr_pin = drvr_path->pin(this);
-  printf("Splitting load from driver %s\n", network_ -> name(drvr_pin));
+  printf("D %d Splitting load from driver %s\n", debug,network_ -> name(drvr_pin));
   
   const PathRef* load_path = expanded->path(drvr_index + 1);
   Vertex* load_vertex = load_path->vertex(sta_);
@@ -1371,14 +1375,18 @@ void RepairSetup::splitLoads(const PathRef* drvr_path,
   db_network_->net(drvr_pin, db_drvr_net, db_mod_drvr_net);
 
   if (db_mod_drvr_net){
-    printf("Splitting a mod net load\n");
+    printf("Splitting a mod net load %s\n", db_mod_drvr_net -> getName());
   }
+  else
+    printf("No mod net -- just db net %s\n", db_drvr_net -> getName());
   
   const string buffer_name = resizer_->makeUniqueInstName("split");
 
   // H-Fix Use driver parent for hierarchy, not the top instance
   Instance* parent = db_network_->getOwningInstanceParent(drvr_pin);
 
+  printf("Parent owning instance of driver is in %s\n", db_network_ -> name(parent));
+  
   LibertyCell* buffer_cell = resizer_->buffer_lowest_drive_;
   const Point drvr_loc = db_network_->location(drvr_pin);
 
@@ -1442,6 +1450,7 @@ void RepairSetup::splitLoads(const PathRef* drvr_path,
     Vertex* load_vertex = fanout_slack.first;
     Pin* load_pin = load_vertex->pin();
 
+    printf("load is in %s\n", db_network_ -> name(load_pin));    
     odb::dbITerm* load_iterm;
     odb::dbBTerm* load_bterm;
     odb::dbModITerm* load_moditerm;
@@ -1475,6 +1484,9 @@ void RepairSetup::splitLoads(const PathRef* drvr_path,
       Instance* load_parent = db_network_->getOwningInstanceParent(load_pin);
 
       if (load_parent != parent) {
+
+        printf("Got split load across hierarchy !\n");
+        
         std::string unique_connection_name = resizer_->makeUniqueNetName();
 
         odb::dbITerm* load_pin_iterm;
@@ -1960,8 +1972,10 @@ void RepairSetup::repairSetupLastGasp(const OptoParams& params, int& num_viols)
       curr_tns = sta_->totalNegativeSlack(max_);
 
       // Accept only moves that improve both WNS and TNS
-      if (fuzzyGreaterEqual(curr_worst_slack, prev_worst_slack)
-          && fuzzyGreaterEqual(curr_tns, prev_tns)) {
+      if (1){
+        //hack
+        //fuzzyGreaterEqual(curr_worst_slack, prev_worst_slack)
+        //          && fuzzyGreaterEqual(curr_tns, prev_tns)) {
         // clang-format off
         debugPrint(logger_, RSZ, "repair_setup", 1, "sizing move accepted for "
                    "endpoint {} pass {} because WNS improved to {:0.3f} and "

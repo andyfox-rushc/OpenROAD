@@ -481,6 +481,7 @@ void dbITerm::connect(dbModNet* mod_net)
   _dbModNet* _mod_net = (_dbModNet*) mod_net;
   _dbBlock* block = (_dbBlock*) iterm->getOwner();
 
+  printf("Connecting mod iterm to mod net %s\n", mod_net -> getName());
   if (iterm->_mnet == _mod_net->getId()) {
     return;
   }
@@ -584,7 +585,10 @@ void dbITerm::disconnect()
     return;
   }
   _dbModNet* mod_net = block->_modnet_tbl->getPtr(iterm->_mnet);
+  printf("Disconnecting modnet %s from iterm\n",
+         mod_net -> _name);
 
+  
   if (mod_net->_iterms == id) {
     mod_net->_iterms = iterm->_next_modnet_iterm;
     if (mod_net->_iterms != 0) {

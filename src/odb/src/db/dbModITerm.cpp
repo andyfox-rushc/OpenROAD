@@ -337,6 +337,7 @@ void dbModITerm::connect(dbModNet* net)
 
 void dbModITerm::disconnect()
 {
+         
   _dbModITerm* _moditerm = (_dbModITerm*) this;
   _dbBlock* _block = (_dbBlock*) _moditerm->getOwner();
   if (_moditerm->_mod_net == 0) {
@@ -344,6 +345,10 @@ void dbModITerm::disconnect()
   }
   _dbModNet* _modnet = _block->_modnet_tbl->getPtr(_moditerm->_mod_net);
 
+  printf("Disconnecting mod iterm %s from net %s\n",
+         getName(),
+         _modnet -> _name);
+  
   if (_block->_journal) {
     debugPrint(_moditerm->getImpl()->getLogger(),
                utl::ODB,
