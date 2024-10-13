@@ -850,22 +850,19 @@ Instance* dbNetwork::parent(const Instance* instance) const
   if (mod_inst) {
     auto parent_module = mod_inst->getParent();
     if (parent_module) {
-      if (auto parent_inst = parent_module->getModInst()) {
-        if (parent_inst) {
-          return dbToSta(parent_inst);
-        }
+      auto parent_inst = parent_module->getModInst();
+      if (parent_inst) {
+        return dbToSta(parent_inst);
       }
     }
   }
-  if (hierarchy_) {
-    if (db_inst) {
-      auto parent_module = db_inst->getModule();
-      if (parent_module) {
-        if (auto parent_inst = parent_module->getModInst()) {
-          if (parent_inst) {
-            return dbToSta(parent_inst);
-          }
-        }
+
+  if (db_inst) {
+    auto parent_module = db_inst->getModule();
+    if (parent_module) {
+      auto parent_inst = parent_module->getModInst();
+      if (parent_inst) {
+        return dbToSta(parent_inst);
       }
     }
   }
