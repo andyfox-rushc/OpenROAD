@@ -864,7 +864,6 @@ Instance* dbNetwork::parent(const Instance* instance) const
       }
     }
   }
-  
   return top_instance_;
 }
 
