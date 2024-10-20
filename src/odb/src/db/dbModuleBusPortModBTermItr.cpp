@@ -83,7 +83,6 @@ uint dbModuleBusPortModBTermItr::begin(dbObject* parent)
 {
   // User Code Begin begin
   _dbBusPort* _busport = (_dbBusPort*) parent;
-  _iter = _modbterm_tbl->getPtr(_busport->_members);
   _size = abs(_busport->_from - _busport->_to) + 1;
   _ix = 0;
   return _busport->_members;
@@ -101,7 +100,11 @@ uint dbModuleBusPortModBTermItr::next(uint id, ...)
   _dbModBTerm* lmodbterm = _modbterm_tbl->getPtr(id);
   _ix++;
   uint ret = lmodbterm->_next_entry;
-  _iter = _modbterm_tbl->getPtr(ret);
+  if (ret == 0) {
+    // list could be empty
+    return 0;
+  }
+
   return ret;
   // User Code End next
 }
