@@ -892,6 +892,9 @@ bool dbNetwork::isLeaf(const Instance* instance) const
     dbMaster* db_master;
     dbModule* db_module;
     Cell* cur_cell = cell(instance);
+    if (isConcreteCell(cur_cell)){
+      return true;
+    }
     staToDb(cur_cell, db_master, db_module);
     if (db_module)
       return false;
