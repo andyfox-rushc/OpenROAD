@@ -1285,8 +1285,8 @@ dbNet* dbNetwork::flatNet(const Pin* pin) const
 
 dbModNet* dbNetwork::hierNet(const Pin* pin) const
 {
-  dbNet* db_net;
-  dbModNet* db_modnet;
+  dbNet* db_net = nullptr;
+  dbModNet* db_modnet = nullptr;
   net(pin, db_net, db_modnet);
   return db_modnet;
 }
@@ -1611,28 +1611,42 @@ const char* dbNetwork::pathName(const Net* net) const
 }
 
 /*
-  dbNets which are connected to pins which have mod nets are
-  "boundaries".
+  Get all the dbModNets and dbNets related to a pin.
  */
 
-class PinModNetConnection : public PinVisitor
+class PinModDbNetConnection : public PinVisitor
 {
  public:
-  PinModNetConnection(const dbNetwork* nwk);
+  PinModDbNetConnection(const dbNetwork* nwk,
+                        Logger* logger,
+                        const Net* net_to_search);
   void operator()(const Pin* pin) override;
-  dbModNet* modnet_;
+  std::set<dbModNet*> modnets_;
+  dbNet* dbnet_;
+  Logger* logger_ = nullptr;
+  bool db_net_search_ = false;
+  const Net* search_net_;
 
  protected:
   const dbNetwork* db_network_;
 };
 
-PinModNetConnection::PinModNetConnection(const dbNetwork* nwk)
+PinModDbNetConnection::PinModDbNetConnection(const dbNetwork* nwk,
+                                             Logger* logger,
+                                             const Net* net_to_search)
     : db_network_(nwk)
 {
-  modnet_ = nullptr;
+  dbnet_ = nullptr;
+  logger_ = logger;
+  // figure out type of search
+  dbNet* db_net;
+  dbModNet* db_modnet;
+  nwk->staToDb(net_to_search, db_net, db_modnet);
+  db_net_search_ = (db_net != nullptr);
+  search_net_ = net_to_search;
 }
 
-void PinModNetConnection::operator()(const Pin* pin)
+void PinModDbNetConnection::operator()(const Pin* pin)
 {
   dbITerm* iterm;
   dbBTerm* bterm;
@@ -1642,26 +1656,85 @@ void PinModNetConnection::operator()(const Pin* pin)
   db_network_->staToDb(pin, iterm, bterm, moditerm, modbterm);
 
   if (iterm && iterm->getModNet()) {
-    modnet_ = iterm->getModNet();
+    modnets_.insert(iterm->getModNet());
   } else if (bterm && bterm->getModNet()) {
-    modnet_ = bterm->getModNet();
+    modnets_.insert(bterm->getModNet());
   } else if (moditerm && moditerm->getModNet()) {
-    modnet_ = moditerm->getModNet();
+    modnets_.insert(moditerm->getModNet());
   } else if (modbterm && modbterm->getModNet()) {
-    modnet_ = modbterm->getModNet();
+    modnets_.insert(modbterm->getModNet());
+  }
+
+  dbNet* candidate_flat_net = db_network_->flatNet(pin);
+  if (candidate_flat_net) {
+    //
+    // TODO: comment out this check (once all cases in ORFS pass).
+    //----------------------------
+    //
+    // Axiom check. We expect each modnet to have only
+    // one flat net associated with it. So when doing  a modnet -> dbNet
+    // search flag issue an error if we see multiple dbnets
+    //
+    // When doing a search from a dbNet it is ok to have tons of dbModNets
+    // corresponding to many hierarchical connections up and down the hierarchy
+    // But when doing a search from a modnet (ie db_net_search==false) we
+    // must always have at most one equivalent flat connection.
+    //
+    //
+
+    if (db_net_search_ == false) {
+      if (dbnet_ != nullptr && dbnet_ != candidate_flat_net) {
+        logger_->error(
+            ORD,
+            2030,
+            "Flat net logical inconsistency, badly formed hierarchical "
+            "netlist. "
+            "Only expect one flat net reachable per pin. Nets are {} and {} "
+            "modnet is {}",
+            db_network_->name(db_network_->dbToSta(dbnet_)),
+            db_network_->name(db_network_->dbToSta(candidate_flat_net)),
+            db_network_->name(search_net_));
+      }
+    }
+    dbnet_ = candidate_flat_net;
   }
 }
 
 /*
 Find if there is a modnet equivalent to a dbNet.
+We always expect all the pins on a net to members of the same
+net.
+
+Go through all the pins on the modnet and get all the dbNets.
+
+A dbnet could have many modnets (eg a dbNet might connect
+two objects in different parts of the hierarchy, each connected
+by different dbModNets in different parts of the hierarchy).
+
+A modnet should only have one dbNet, and we check for that.
 */
 
-dbModNet* dbNetwork::findRelatedModNet(const dbNet* net) const
+bool dbNetwork::findRelatedModNet(const dbNet* net,
+                                  std::set<dbModNet*>& modnet_set) const
 {
-  PinModNetConnection visitor(this);
-  NetSet visited_nets;
+  // we pass in the net and decode it for axiom checking.
+  PinModDbNetConnection visitor(this, logger_, dbToSta(net));
+  NetSet visited_nets(this);
   visitConnectedPins(dbToSta(net), visitor, visited_nets);
-  return visitor.modnet_;
+  modnet_set = visitor.modnets_;
+  return (modnet_set.size() != 0);
+}
+
+/*
+A modnet can have only one equivalent dbNet.
+*/
+dbNet* dbNetwork::findRelatedDbNet(const dbModNet* net) const
+{
+  // we pass in the net and decode it for axiom checking.
+  PinModDbNetConnection visitor(this, logger_, dbToSta(net));
+  NetSet visited_nets(this);
+  visitConnectedPins(dbToSta(net), visitor, visited_nets);
+  return visitor.dbnet_;
 }
 
 const char* dbNetwork::name(const Net* net) const
@@ -1725,23 +1798,75 @@ const char* dbNetwork::name(const Net* net) const
   return nullptr;
 }
 
-Instance* dbNetwork::instance(const Net*) const
+Instance* dbNetwork::instance(const Net* net) const
 {
-  // modnets are in dbModInstance.
-  // for dbNet apply an algorithm
+  if (!hierarchy_) {
+    return top_instance_;
+  }
+  dbNet* db_net;
+  dbModNet* db_modnet;
+  staToDb(net, db_net, db_modnet);
+
+  if (db_modnet) {
+    dbModule* parent_module = db_modnet->getParent();
+    dbModInst* parent_instance = parent_module->getModInst();
+    return dbToSta(parent_instance);
+  }
+
+  if (db_net) {
+    // get the instance for the driver.
+    // stop at hierachical boundaries
+    Pin* ignore_driver_pin;
+    //
+    // getNetDriverParentModule has to call pinDrivers which is non const...
+    // so we have to unconst this network, which feels weird. Would welcome
+    // any suggestions on how to avoid this.
+    //
+    dbModule* parent_module
+        = const_cast<dbNetwork*>(this)->getNetDriverParentModule(
+            net, ignore_driver_pin, false);
+    (void) (ignore_driver_pin);
+    dbModInst* parent_instance = parent_module->getModInst();
+    if (parent_instance) {
+      return dbToSta(parent_instance);
+    }
+    return top_instance_;
+  }
   return top_instance_;
 }
 
 bool dbNetwork::isPower(const Net* net) const
 {
-  dbNet* dnet = staToDb(net);
-  return (dnet->getSigType() == dbSigType::POWER);
+  dbNet* db_net;
+  dbModNet* db_modnet;
+  staToDb(net, db_net, db_modnet);
+  if (db_net) {
+    return (db_net->getSigType() == dbSigType::POWER);
+  }
+  if (db_modnet) {
+    dbNet* related_net = findRelatedDbNet(db_modnet);
+    if (related_net) {
+      return (related_net->getSigType() == dbSigType::POWER);
+    }
+  }
+  return false;
 }
 
 bool dbNetwork::isGround(const Net* net) const
 {
-  dbNet* dnet = staToDb(net);
-  return (dnet->getSigType() == dbSigType::GROUND);
+  dbNet* db_net;
+  dbModNet* db_modnet;
+  staToDb(net, db_net, db_modnet);
+  if (db_net) {
+    return (db_net->getSigType() == dbSigType::GROUND);
+  }
+  if (db_modnet) {
+    dbNet* related_net = findRelatedDbNet(db_modnet);
+    if (related_net) {
+      return (related_net->getSigType() == dbSigType::GROUND);
+    }
+  }
+  return false;
 }
 
 NetPinIterator* dbNetwork::pinIterator(const Net* net) const
@@ -1760,14 +1885,12 @@ void dbNetwork::visitConnectedPins(const Net* net,
                                    PinVisitor& visitor,
                                    NetSet& visited_nets) const
 {
-  dbModNet* mod_net = nullptr;
-  dbNet* db_net = nullptr;
-
   if (visited_nets.hasKey(net)) {
     return;
   }
-
   visited_nets.insert(net);
+  dbModNet* mod_net;
+  dbNet* db_net;
   staToDb(net, db_net, mod_net);
 
   if (mod_net) {
@@ -1900,6 +2023,44 @@ dbNet* dbNetwork::flatNet(const Term* term) const
   }
   logger_->error(
       ORD, 2029, "Illegal term for getting a flat net, must be bterm");
+
+  return nullptr;
+}
+
+/*
+Get the hierarchical net for a term.
+*/
+
+dbModNet* dbNetwork::hierNet(const Term* term) const
+{
+  dbITerm* iterm = nullptr;
+  dbBTerm* bterm = nullptr;
+  dbModITerm* moditerm = nullptr;
+  dbModBTerm* modbterm = nullptr;
+
+  staToDb(term, iterm, bterm, moditerm, modbterm);
+
+  if (bterm) {
+    dbModNet* modnet = bterm->getModNet();
+    return modnet;
+  }
+
+  if (iterm) {
+    dbModNet* modnet = iterm->getModNet();
+    return modnet;
+  }
+
+  if (moditerm) {
+    dbModNet* modnet = moditerm->getModNet();
+    return modnet;
+  }
+
+  if (modbterm) {
+    dbModNet* modnet = modbterm->getModNet();
+    return modnet;
+  }
+
+  logger_->error(ORD, 2031, "Illegal term for getting a hiearchical net");
 
   return nullptr;
 }
@@ -3312,7 +3473,7 @@ In non-hier mode, stop at the module boundaries
 
 */
 
-dbModule* dbNetwork::getNetDriverParentModule(Net* net,
+dbModule* dbNetwork::getNetDriverParentModule(const Net* net,
                                               Pin*& driver_pin,
                                               bool hier)
 {
@@ -3324,9 +3485,9 @@ dbModule* dbNetwork::getNetDriverParentModule(Net* net,
       //
       // get sink driver instance and return its parent
       //
-      PinSet* drivers = this->drivers(net);
-      if (drivers && !drivers->empty()) {
-        PinSet::Iterator drvr_iter(drivers);
+      PinSet* ldrivers = drivers(net);
+      if (ldrivers && !ldrivers->empty()) {
+        PinSet::Iterator drvr_iter(ldrivers);
         const Pin* drvr_pin = drvr_iter.next();
         driver_pin = const_cast<Pin*>(drvr_pin);
         odb::dbITerm* iterm;
@@ -3350,8 +3511,8 @@ dbModule* dbNetwork::getNetDriverParentModule(Net* net,
       // and return the dbModule owning the instance doing the
       // driving
       Net* sta_net = dbToSta(modnet);
-      PinSet* drivers = this->drivers(sta_net);
-      for (auto pin : *drivers) {
+      PinSet* ldrivers = drivers(sta_net);
+      for (auto pin : *ldrivers) {
         dbITerm* iterm = nullptr;
         dbBTerm* bterm = nullptr;
         dbModITerm* moditerm = nullptr;

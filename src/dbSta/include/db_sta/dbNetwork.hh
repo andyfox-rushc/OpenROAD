@@ -186,7 +186,7 @@ class dbNetwork : public ConcreteNetwork
   // generic connect pin -> flat_net, hier_net.
   void connectPin(Pin* pin, Net* flat_net, Net* hier_net);
   // hierarchical support functions
-  dbModule* getNetDriverParentModule(Net* net,
+  dbModule* getNetDriverParentModule(const Net* net,
                                      Pin*& driver_pin,
                                      bool hier = false);
   Instance* getOwningInstanceParent(Pin* pin);
@@ -247,7 +247,8 @@ class dbNetwork : public ConcreteNetwork
   void setAttribute(Instance* instance,
                     const string& key,
                     const string& value) override;
-  dbModNet* findRelatedModNet(const dbNet*) const;
+  bool findRelatedModNet(const dbNet*, std::set<dbModNet*>& modnet_set) const;
+  dbNet* findRelatedDbNet(const dbModNet*) const;  
 
   ////////////////////////////////////////////////////////////////
   // Pin functions
@@ -275,6 +276,7 @@ class dbNetwork : public ConcreteNetwork
   // Terminal functions
   Net* net(const Term* term) const override;
   dbNet* flatNet(const Term* term) const;
+  dbModNet* hierNet(const Term* term) const;  
   Pin* pin(const Term* term) const override;
   ObjectId id(const Term* term) const override;
 
