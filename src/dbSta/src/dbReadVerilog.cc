@@ -61,6 +61,7 @@ using sta::LibertyCell;
 using sta::Net;
 using sta::NetConnectedPinIterator;
 using sta::NetIterator;
+using sta::NetPinIterator;
 using sta::NetTermIterator;
 using sta::Network;
 using sta::Pin;
@@ -142,6 +143,17 @@ bool dbVerilogNetwork::isBlackBox(ConcreteCell* cell)
 class Verilog2db
 {
  public:
+  using InstxDbModInstPair = std::pair<const Instance*, dbModInst*>;
+  using InstxDbModInstPairs = std::vector<InstxDbModInstPair>;
+
+  using InstxDbInstPair = std::pair<const Instance*, dbInst*>;
+  using InstxDbInstPairs = std::vector<InstxDbInstPair>;
+
+  using PinxITermPair = std::pair<const Pin*, dbITerm*>;
+  using PinxBTermPair = std::pair<const Pin*, dbBTerm*>;
+  using PinxITermPairs = std::vector<PinxITermPair>;
+  using PinxBTermPairs = std::vector<PinxBTermPair>;
+
   Verilog2db(Network* verilog_network,
              dbDatabase* db,
              Logger* logger,
@@ -150,6 +162,19 @@ class Verilog2db
   void makeBlock();
   void makeUnusedBlock(const char* name);
   void makeDbNetlist();
+
+  void makeTopPinsAndNets();
+  void makeTopConnections();
+
+  void getDbInstDriverPins(InstxDbInstPairs& db_insts,
+                           PinxITermPairs& db_inst_driver_pins,
+                           PinxITermPairs& db_inst_const_pins,
+                           PinxITermPairs& db_inst_undriven_net_pins);
+
+  void makeFlatNets(PinxITermPairs& db_inst_driver_pins);
+  void makeConstNets(PinxITermPairs& db_inst_const_pins);
+  void makeUndrivenPinNets(PinxITermPairs& db_inst_undriven_net_pins);
+
   void makeUnusedDbNetlist();
   void processUnusedCells(const char* top_cell_name,
                           dbVerilogNetwork* verilog_network,
@@ -162,10 +187,17 @@ class Verilog2db
     std::string file_name;
     int line_number;
   };
-  using InstPair = std::pair<const Instance*, dbModInst*>;
-  using InstPairs = std::vector<InstPair>;
-  void makeDbModule(Instance* inst, dbModule* parent, InstPairs& inst_pairs);
-  void makeChildInsts(Instance* inst, dbModule* module, InstPairs& inst_pairs);
+
+  void makeDbModule(Instance* inst,
+                    dbModule* parent,
+                    InstxDbModInstPairs& mod_inst_pairs,
+                    InstxDbInstPairs& db_inst_pairs);
+
+  void makeChildInsts(Instance* inst,
+                      dbModule* module,
+                      InstxDbModInstPairs& mod_inst_pairs,
+                      InstxDbInstPairs& db_inst_pairs);
+
   void makeModBTerms(Cell* cell, dbModule* module);
   void makeModITerms(Instance* inst, dbModInst* modinst);
   dbIoType staToDb(PortDirection* dir);
@@ -179,7 +211,7 @@ class Verilog2db
   void makeDbNets(const Instance* inst);
 
   void makeVModNets(const Instance* inst, dbModInst* mod_inst);
-  void makeVModNets(InstPairs& inst_pairs);
+  void makeVModNets(InstxDbModInstPairs& inst_pairs);
   dbModNet* constructModNet(Net* inst_pin_net, dbModule* module);
 
   bool hasTerminals(Net* net) const;
@@ -228,7 +260,6 @@ bool dbLinkDesign(const char* top_cell_name,
     v2db.processUnusedCells(
         top_cell_name, verilog_network, link_make_black_boxes);
   }
-
   return success;
 }
 
@@ -281,16 +312,87 @@ void Verilog2db::makeBlock()
   block_->setBusDelimiters('[', ']');
 }
 
+/*
+makeDbNetlist:
+In this version we avoid attempting to construct the flat nets during
+recursive dbInst/dbModInst creation.Instead we create the instances and
+then construct the flat nets starting from the primary i/o and
+the outputs of the low level instance.
+*/
+
 void Verilog2db::makeDbNetlist()
 {
   recordBusPortsOrder();
-  // As a side effect we accumulate the instance <-> modinst pairs
-  InstPairs inst_pairs;
-  makeDbModule(network_->topInstance(), /* parent */ nullptr, inst_pairs);
-  makeDbNets(network_->topInstance());
-  if (hierarchy_) {
-    makeVModNets(inst_pairs);
+
+  // Use original flow if not in hierarchical mode
+  if (!hierarchy_) {
+    InstxDbModInstPairs mod_inst_pairs;
+    InstxDbInstPairs db_inst_pairs;
+    makeDbModule(network_->topInstance(),
+                 /* parent */ nullptr,
+                 mod_inst_pairs,
+                 db_inst_pairs);
+    makeDbNets(network_->topInstance());
+    for (auto inst : dont_touch_insts_) {
+      inst->setDoNotTouch(true);
+    }
+    return;
   }
+
+  // New code db builder
+  //
+  // 1. Allows pass throughs at intermediate levels of hierarchy.
+  // 2. Avoids original recursive algorithm in makeDbNets.
+
+  // Step 1.  make the instances reachable from the top instance
+  // (uses original hierarchical traversal down through the hierarchy).
+  // Keep correlation of Sta Instance and database instance
+  // for subsequent wiring
+
+  InstxDbModInstPairs mod_inst_defs;  // vec of Instance x dbModInst
+  InstxDbInstPairs db_inst_defs;      // vec of Instance x dbInst
+  makeDbModule(network_->topInstance(),
+               /* parent */ nullptr,
+               mod_inst_defs,
+               db_inst_defs);
+
+  // Step 2: Make the top level pins and wiring
+  makeTopPinsAndNets();
+  // Make the top level connections:
+  // Primary Ips -> dbInst
+  makeTopConnections();
+
+  //
+  // Step 3: Create the "core" dbInst flat wiring.
+  //
+
+  // Step 3.1: Get the leaf cell pin drivers
+  PinxITermPairs db_inst_driver_pins;  // iterms driving a dbInst
+  PinxITermPairs db_inst_const_pins;   // iterms on dbInst hooked to const
+  PinxITermPairs
+      db_inst_undriven_net_pins;  // iterms on dbInst hooked to undriven nets
+  getDbInstDriverPins(db_inst_defs,
+                      db_inst_driver_pins,
+                      db_inst_const_pins,
+                      db_inst_undriven_net_pins);
+
+  // Step 3.2: Make the nets for each dbInst pin driver
+  // dbInst -> dbInst,primary_ops
+  makeFlatNets(db_inst_driver_pins);
+  // Step 3.3: Make any constants to dbInst connection
+  makeConstNets(db_inst_const_pins);
+  // Step 3.4: handle any dangling nets in the core which are hooked
+  // to an instance.
+  makeUndrivenPinNets(db_inst_undriven_net_pins);
+
+  // Step 4
+  // Create the hierarchical wiring.
+  // These are the nets which connect the hierarchical objects
+  // to the flat objects and occur at the edges of modules.
+  //
+  makeVModNets(mod_inst_defs);
+
+  // Step 5: handle dont touches
   for (auto inst : dont_touch_insts_) {
     inst->setDoNotTouch(true);
   }
@@ -377,7 +479,8 @@ void Verilog2db::makeDbModule(
     Instance* inst,
     dbModule* parent,
     // harvest the hierarchical instances. Modnets connected to these
-    InstPairs& inst_pairs)
+    InstxDbModInstPairs& mod_inst_pairs,
+    InstxDbInstPairs& db_inst_pairs)
 {
   Cell* cell = network_->cell(inst);
 
@@ -394,7 +497,7 @@ void Verilog2db::makeDbModule(
     dbModInst* modinst
         = dbModInst::create(parent, module, module_inst_name.c_str());
 
-    inst_pairs.emplace_back(inst, modinst);
+    mod_inst_pairs.emplace_back(inst, modinst);
 
     // Verilog attribute is on a cell not an instance
     std::string impl_oper = network_->getAttribute(cell, "implements_operator");
@@ -429,7 +532,7 @@ void Verilog2db::makeDbModule(
       makeModITerms(inst, modinst);
     }
   }
-  makeChildInsts(inst, module, inst_pairs);
+  makeChildInsts(inst, module, mod_inst_pairs, db_inst_pairs);
 }
 
 void Verilog2db::makeModBTerms(Cell* cell, dbModule* module)
@@ -532,14 +635,15 @@ void Verilog2db::makeModITerms(Instance* inst, dbModInst* modinst)
 
 void Verilog2db::makeChildInsts(Instance* inst,
                                 dbModule* module,
-                                InstPairs& inst_pairs)
+                                InstxDbModInstPairs& mod_inst_pairs,
+                                InstxDbInstPairs& db_inst_pairs)
 {
   std::unique_ptr<InstanceChildIterator> child_iter{
       network_->childIterator(inst)};
   while (child_iter->hasNext()) {
     Instance* child = child_iter->next();
     if (network_->isHierarchical(child)) {
-      makeDbModule(child, module, inst_pairs);
+      makeDbModule(child, module, mod_inst_pairs, db_inst_pairs);
     } else {
       const char* child_name = network_->pathName(child);
       Instance* parent_instance = network_->parent(child);
@@ -566,6 +670,7 @@ void Verilog2db::makeChildInsts(Instance* inst,
       }
 
       auto db_inst = dbInst::create(block_, master, child_name, false, module);
+      db_inst_pairs.emplace_back(child, db_inst);
       debugPrint(logger_,
                  utl::ODB,
                  "dbReadVerilog",
@@ -585,7 +690,6 @@ void Verilog2db::makeChildInsts(Instance* inst,
           dont_touch_insts_.push_back(db_inst);
         }
       }
-
       if (db_inst == nullptr) {
         logger_->error(ORD,
                        2015,
@@ -600,7 +704,6 @@ void Verilog2db::makeChildInsts(Instance* inst,
       && module->getChildren().orderReversed()) {
     module->getChildren().reverse();
   }
-
   if (module->getInsts().reversible() && module->getInsts().orderReversed()) {
     module->getInsts().reverse();
   }
@@ -693,80 +796,398 @@ dbIoType Verilog2db::staToDb(PortDirection* dir)
   return dbIoType::INOUT;
 }
 
-void Verilog2db::makeDbNets(const Instance* inst)
+/*
+Make the top pins, top nets and handle any tie offs
+to top level. Implicitly handles the through cases
+*/
+void Verilog2db::makeTopPinsAndNets()
 {
-  bool is_top = (inst == network_->topInstance());
+  Instance* inst = network_->topInstance();
   std::unique_ptr<NetIterator> net_iter{network_->netIterator(inst)};
-  // Todo, put dbnets in the module in case of hierarchy (not block)
+  std::map<std::string, dbNet*> top_nets;  // unique top level nets
+
   while (net_iter->hasNext()) {
-    Net* net = net_iter->next();
-
-    if (!is_top && hasTerminals(net)) {
-      continue;
-    }
-
-    const char* net_name = network_->pathName(net);
-    dbNet* db_net = dbNet::create(block_, net_name);
-    debugPrint(logger_,
-               utl::ODB,
-               "dbReadVerilog",
-               2,
-               "makeDbNets created net {}",
-               db_net->getName());
-    if (network_->isPower(net)) {
-      db_net->setSigType(odb::dbSigType::POWER);
-    }
-    if (network_->isGround(net)) {
-      db_net->setSigType(odb::dbSigType::GROUND);
-    }
+    Net* sta_net = net_iter->next();
+    std::string sta_net_name = network_->pathName(sta_net);
+    dbNet* flat_net_db = nullptr;
 
     // Sort connected pins for regression stability.
     PinSeq net_pins;
     std::unique_ptr<NetConnectedPinIterator> pin_iter{
-        network_->connectedPinIterator(net)};
+        network_->connectedPinIterator(sta_net)};
     while (pin_iter->hasNext()) {
       const Pin* pin = pin_iter->next();
       net_pins.push_back(pin);
+      // make the flat net for the top level pin
+      // Note that we already have a net for this name
+      // we reuse it.
+      if (network_->isTopLevelPort(pin)) {
+        if (top_nets.find(sta_net_name) != top_nets.end()) {
+          flat_net_db = top_nets[sta_net_name];
+        } else {
+          flat_net_db = dbNet::create(block_, sta_net_name.c_str());
+          top_nets[sta_net_name] = flat_net_db;
+        }
+      }
     }
     sort(net_pins, PinPathNameLess(network_));
 
     for (const Pin* pin : net_pins) {
       if (network_->isTopLevelPort(pin)) {
         const char* port_name = network_->portName(pin);
-        if (block_->findBTerm(port_name) == nullptr) {
-          dbBTerm* bterm = dbBTerm::create(db_net, port_name);
-          debugPrint(logger_,
-                     utl::ODB,
-                     "dbReadVerilog",
-                     2,
-                     "makeDbNets created bterm {}",
-                     bterm->getName());
+        dbBTerm* bterm = block_->findBTerm(port_name);
+        // Make the top level port and nets
+        if (!bterm) {
+          // This will handle any implicit through connections
+          // because the flat_net_db could be connected to multiple
+          // top level ports.
+          bterm = dbBTerm::create(flat_net_db, port_name);
           dbIoType io_type = staToDb(network_->direction(pin));
           bterm->setIoType(io_type);
-        }
-      } else if (network_->isLeaf(pin)) {
-        const char* port_name = network_->portName(pin);
-        Instance* inst = network_->instance(pin);
-        const char* inst_name = network_->pathName(inst);
-        dbInst* db_inst = block_->findInst(inst_name);
-        if (db_inst) {
-          dbMaster* master = db_inst->getMaster();
-          dbMTerm* mterm = master->findMTerm(block_, port_name);
-          if (mterm) {
-            db_inst->getITerm(mterm)->connect(db_net);
-            debugPrint(logger_,
-                       utl::ODB,
-                       "dbReadVerilog",
-                       2,
-                       "makeDbNets connected mterm {} to net {}",
-                       mterm->getName(),
-                       db_net->getName());
+          // handle the tie off case
+          if (network_->isPower(sta_net)) {
+            flat_net_db->setSigType(odb::dbSigType::POWER);
+          }
+          if (network_->isGround(sta_net)) {
+            flat_net_db->setSigType(odb::dbSigType::GROUND);
           }
         }
       }
     }
   }
+}
 
+/*
+Make the connections to the top level i/o.
+Cases:
+1. Top i/o -> dbInst
+*/
+
+void Verilog2db::makeTopConnections()
+{
+  Instance* inst = network_->topInstance();
+  std::unique_ptr<NetIterator> net_iter{network_->netIterator(inst)};
+  static int debug;
+  while (net_iter->hasNext()) {
+    debug++;
+    Net* net = net_iter->next();
+    // Sort connected pins for regression stability.
+    PinSeq net_pins;
+    std::unique_ptr<NetConnectedPinIterator> pin_iter{
+        network_->connectedPinIterator(net)};
+
+    dbNet* primary_port_net = nullptr;  // net hooked to primary port
+
+    while (pin_iter->hasNext()) {
+      const Pin* pin = pin_iter->next();
+      if (network_->isTopLevelPort(pin)) {
+        const char* port_name = network_->portName(pin);
+        dbBTerm* bterm = block_->findBTerm(port_name);
+        primary_port_net = bterm->getNet();
+      }
+      net_pins.push_back(pin);
+    }
+
+    sort(net_pins, PinPathNameLess(network_));
+
+    // we are only interested in connections involving the primary i/o
+    if (primary_port_net) {
+      for (const Pin* pin : net_pins) {
+        // hook up the and dbInst core cells.
+        // we later connect up the core cells
+        // which will cover the dbInst -> primary output case
+        // In case where leaf dbInst ip is hooked to a primary port
+        // we use the primary_port_net extracted above. we don't
+        // care if that comes from a primary input or a primary output
+
+        if ((network_->isLeaf(pin))
+            && (network_->direction(pin) == PortDirection::input()
+                || network_->direction(pin) == PortDirection::bidirect())) {
+          Instance* inst = network_->instance(pin);
+          const char* inst_name = network_->pathName(inst);
+          dbInst* db_inst = block_->findInst(inst_name);
+          if (db_inst) {
+            dbMaster* master = db_inst->getMaster();
+            const char* port_name = network_->portName(pin);
+            dbMTerm* mterm = master->findMTerm(block_, port_name);
+            if (mterm) {
+              dbITerm* iterm = db_inst->getITerm(mterm);
+              if (iterm->getNet() == nullptr) {
+                // connect leaf pin to primary port_net
+                iterm->connect(primary_port_net);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/*
+Make the core flat nets. These are the flat nets driven
+from leaf instances.
+
+Create the flat net from a dbITerm. Search its fanout
+through hierarchy and connect up.
+
+
+Cases:
+Iterm -> ITerm (dbInst op -> dbInst ip)
+Iterm -> BTerm (dbInst op -> primary op)
+
+*/
+
+void Verilog2db::makeFlatNets(PinxITermPairs& db_inst_driver_pins)
+{
+  for (auto& [pin, db_iterm] : db_inst_driver_pins) {
+    const Net* sta_net = network_->net(pin);
+    if (sta_net) {
+      dbNet* flat_net_db = nullptr;
+      // get the fanout pins
+      PinSeq net_pins;
+      std::unique_ptr<NetConnectedPinIterator> pin_iter{
+          network_->connectedPinIterator(sta_net)};
+      while (pin_iter->hasNext()) {
+        const Pin* pin = pin_iter->next();
+        // if the fanout pin is a top level port then
+        // it already has a flat net and we should use it
+        // rather than create a new one.
+        if (network_->isTopLevelPort(pin)) {
+          const char* port_name = network_->portName(pin);
+          dbBTerm* bterm = block_->findBTerm(port_name);
+          flat_net_db = bterm->getNet();
+        }
+        net_pins.push_back(pin);
+      }
+      // for regression stability
+      sort(net_pins, PinPathNameLess(network_));
+      for (const Pin* fanout_pin : net_pins) {
+        // leaf case
+        if (network_->isLeaf(fanout_pin)) {
+          const char* port_name = network_->portName(fanout_pin);
+          Instance* inst = network_->instance(fanout_pin);
+          const char* inst_name = network_->pathName(inst);
+          dbInst* db_inst = block_->findInst(inst_name);
+          dbMaster* master = db_inst->getMaster();
+          dbMTerm* mterm = master->findMTerm(block_, port_name);
+          dbITerm* iterm = db_inst->getITerm(mterm);
+          if (flat_net_db == nullptr) {
+            const char* net_name = network_->pathName(sta_net);
+            flat_net_db = dbNet::create(block_, net_name);
+          }
+          if (iterm->getNet() == nullptr) {
+            iterm->connect(flat_net_db);
+          }
+        }
+        // top level port connection
+        // Note that we have already created the top level
+        // ports earlier.
+        else if (network_->isTopLevelPort(fanout_pin)) {
+          const char* port_name = network_->portName(fanout_pin);
+          // recall we made all the top level bterms before
+          // so if top_level_bterm does not exist something is fatally wrong
+          dbBTerm* top_level_bterm = block_->findBTerm(port_name);
+          const char* net_name = network_->pathName(sta_net);
+          if (top_level_bterm->getNet() == nullptr) {
+            if (flat_net_db == nullptr) {
+              flat_net_db = dbNet::create(block_, net_name);
+            }
+            assert(flat_net_db);
+            top_level_bterm->connect(flat_net_db);
+          }
+        }
+      }
+    }
+  }
+}
+
+/*
+Handle the undriven nets.
+An undriven net is a net hooked to a legal input pin (eg an
+input pin on an instance or a top level pad) which does not
+have a driver
+*/
+
+/*
+Undriven pin net on a core instance pin
+*/
+void Verilog2db::makeUndrivenPinNets(PinxITermPairs& db_inst_undriven_net_pins)
+{
+  for (auto& [pin, db_iterm] : db_inst_undriven_net_pins) {
+    const Net* sta_net = network_->net(pin);
+    if (sta_net) {
+      const char* net_name = network_->pathName(sta_net);
+      dbNet* flat_net = dbNet::create(block_, net_name);
+      db_iterm->connect(flat_net);
+    }
+  }
+}
+
+/*
+Make Constants driving core instance pins
+*/
+void Verilog2db::makeConstNets(PinxITermPairs& const_pins)
+{
+  int const_net_count = 0;
+  for (auto& [pin, db_iterm] : const_pins) {
+    const Net* sta_net = network_->net(pin);
+    if (sta_net) {
+      const char* net_name = network_->pathName(sta_net);
+      if (network_->isPower(sta_net)) {
+        dbNet* flat_net = dbNet::create(block_, net_name);
+        const_net_count++;
+        flat_net->setSigType(odb::dbSigType::POWER);
+        db_iterm->connect(flat_net);
+      }
+      if (network_->isGround(sta_net)) {
+        const_net_count++;
+        dbNet* flat_net = dbNet::create(block_, net_name);
+        flat_net->setSigType(odb::dbSigType::GROUND);
+        db_iterm->connect(flat_net);
+      }
+    }
+  }
+}
+
+/*
+Get the dbInst output driver pins, the inputs driven by constants
+and the inputs connected to undriven nets.
+*/
+
+void Verilog2db::getDbInstDriverPins(InstxDbInstPairs& db_inst_pairs,
+                                     PinxITermPairs& db_inst_driver_pins,
+                                     PinxITermPairs& const_pins,
+                                     PinxITermPairs& db_inst_undriven_net_pins)
+{
+  for (auto& [inst, db_inst] : db_inst_pairs) {
+    std::unique_ptr<InstancePinIterator> pin_iter{network_->pinIterator(inst)};
+    while (pin_iter->hasNext()) {
+      const Pin* pin = pin_iter->next();
+      const char* port_name = network_->portName(pin);
+      dbMaster* master = db_inst->getMaster();
+      dbMTerm* mterm = master->findMTerm(block_, port_name);
+      if (mterm) {
+        dbITerm* iterm = db_inst->getITerm(mterm);
+        Net* sta_net = network_->net(pin);
+        if (network_->direction(pin) == PortDirection::output()
+            || network_->direction(pin) == PortDirection::bidirect()) {
+          db_inst_driver_pins.emplace_back(pin, iterm);
+        } else if (network_->direction(pin) == PortDirection::input()
+                   && sta_net) {
+          if (network_->isPower(sta_net) || network_->isGround(sta_net)) {
+            const_pins.emplace_back(pin, iterm);
+          } else {
+            // catch undriven net case (this is a net without a driver, which
+            // is not quite the same as a truly undriven pin).
+            bool has_driver = false;
+            if (sta_net) {
+              sta::PinSet* driver_set = network_->drivers(sta_net);
+              if (driver_set && driver_set->size() > 0) {
+                has_driver = true;
+              }
+              if (has_driver == false) {
+                db_inst_undriven_net_pins.emplace_back(pin, iterm);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/*
+Original recursive call, seems to have problems
+with "through" cells in hierarchy. See test case hier3.tcl
+*/
+
+void Verilog2db::makeDbNets(const Instance* inst)
+{
+  bool is_top = (inst == network_->topInstance());
+
+  bool leaf_instance = false;
+  if (!is_top) {
+    if (network_->isHierarchical(inst)) {
+      leaf_instance = false;
+    } else {
+      leaf_instance = true;
+    }
+  }
+
+  if (leaf_instance || is_top) {
+    // only make nets for the top or a leaf (db inst)
+
+    std::unique_ptr<NetIterator> net_iter{network_->netIterator(inst)};
+    // Todo, put dbnets in the module in case of hierarchy (not block)
+    while (net_iter->hasNext()) {
+      Net* net = net_iter->next();
+
+      if (!is_top && hasTerminals(net)) {
+        continue;
+      }
+      const char* net_name = network_->pathName(net);
+      dbNet* db_net = dbNet::create(block_, net_name);
+      debugPrint(logger_,
+                 utl::ODB,
+                 "dbReadVerilog",
+                 2,
+                 "makeDbNets created net {}",
+                 db_net->getName());
+      if (network_->isPower(net)) {
+        db_net->setSigType(odb::dbSigType::POWER);
+      }
+      if (network_->isGround(net)) {
+        db_net->setSigType(odb::dbSigType::GROUND);
+      }
+
+      // Sort connected pins for regression stability.
+      PinSeq net_pins;
+      std::unique_ptr<NetConnectedPinIterator> pin_iter{
+          network_->connectedPinIterator(net)};
+      while (pin_iter->hasNext()) {
+        const Pin* pin = pin_iter->next();
+        net_pins.push_back(pin);
+      }
+      sort(net_pins, PinPathNameLess(network_));
+
+      for (const Pin* pin : net_pins) {
+        if (network_->isTopLevelPort(pin)) {
+          const char* port_name = network_->portName(pin);
+          if (block_->findBTerm(port_name) == nullptr) {
+            dbBTerm* bterm = dbBTerm::create(db_net, port_name);
+            debugPrint(logger_,
+                       utl::ODB,
+                       "dbReadVerilog",
+                       2,
+                       "makeDbNets created bterm {}",
+                       bterm->getName());
+            dbIoType io_type = staToDb(network_->direction(pin));
+            bterm->setIoType(io_type);
+          }
+        } else if (network_->isLeaf(pin)) {
+          const char* port_name = network_->portName(pin);
+          Instance* inst = network_->instance(pin);
+          const char* inst_name = network_->pathName(inst);
+          dbInst* db_inst = block_->findInst(inst_name);
+          if (db_inst) {
+            dbMaster* master = db_inst->getMaster();
+            dbMTerm* mterm = master->findMTerm(block_, port_name);
+            if (mterm) {
+              db_inst->getITerm(mterm)->connect(db_net);
+              debugPrint(logger_,
+                         utl::ODB,
+                         "dbReadVerilog",
+                         2,
+                         "makeDbNets connected mterm {} to net {}",
+                         mterm->getName(),
+                         db_net->getName());
+            }
+          }
+        }
+      }
+    }
+  }
   std::unique_ptr<InstanceChildIterator> child_iter{
       network_->childIterator(inst)};
   while (child_iter->hasNext()) {
@@ -775,7 +1196,7 @@ void Verilog2db::makeDbNets(const Instance* inst)
   }
 }
 
-void Verilog2db::makeVModNets(InstPairs& inst_pairs)
+void Verilog2db::makeVModNets(InstxDbModInstPairs& inst_pairs)
 {
   for (auto& [inst, modinst] : inst_pairs) {
     makeVModNets(inst, modinst);
@@ -854,16 +1275,25 @@ void Verilog2db::makeVModNets(const Instance* inst, dbModInst* mod_inst)
     Term* below_term = network_->term(inst_pin);
     if (below_term) {
       below_pin_net = network_->net(below_term);
-      const char* below_net_name = network_->name(below_pin_net);
-      if (child_module->getModNet(below_net_name)) {
-        continue;
-      }
       std::string pin_name = network_->name(below_term);
       size_t last_idx = pin_name.find_last_of('/');
       if (last_idx != std::string::npos) {
         pin_name = pin_name.substr(last_idx + 1);
       }
       dbModBTerm* mod_bterm = child_module->findModBTerm(pin_name.c_str());
+
+      const char* below_net_name = network_->name(below_pin_net);
+      dbModNet* below_mod_net = child_module->getModNet(below_net_name);
+      if (below_mod_net) {
+        // in the assign through case we might already have the mod net
+        // but not connected to the mod_bterm. eg out == in, the modnet
+        // is called in, hooked to modbterm in,
+        // and we need to hook it to the out modbterm.
+        if (mod_bterm && below_mod_net && mod_bterm->getModNet() == nullptr) {
+          mod_bterm->connect(below_mod_net);
+        }
+        continue;
+      }
       dbModNet* lower_mod_net = constructModNet(below_pin_net, child_module);
       mod_bterm->connect(lower_mod_net);
       debugPrint(logger_,
@@ -1138,13 +1568,14 @@ void Verilog2db::makeUnusedDbNetlist()
   dbModule* module = block_->getTopModule();
   Cell* cell = network_->cell(inst);
   makeModBTerms(cell, module);
-  InstPairs inst_pairs;
-  makeChildInsts(inst, module, inst_pairs);
+  InstxDbModInstPairs mod_inst_pairs;
+  InstxDbInstPairs db_inst_pairs;
+  makeChildInsts(inst, module, mod_inst_pairs, db_inst_pairs);
   makeDbNets(inst);
   // Create top-level mod nets
   makeModNets(inst);
   if (hierarchy_) {
-    makeVModNets(inst_pairs);
+    makeVModNets(mod_inst_pairs);
   }
   for (auto inst : dont_touch_insts_) {
     inst->setDoNotTouch(true);
