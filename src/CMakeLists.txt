@@ -244,6 +244,22 @@ set(THREADS_PREFER_PTHREAD_FLAG ON)
 ################################################################
 
 # Build flow tools
+
+if(POLICY CMP0144)
+  cmake_policy(SET CMP0144 NEW)
+endif()
+
+# Optionally set TORCH_ROOT if not provided (fallback)
+if(NOT DEFINED TORCH_ROOT)
+  set(TORCH_ROOT "~/libtorch")  # Default path; adjust if needed
+endif()
+# Find LibTorch (use PATHS with the variable for flexibility)
+find_package(Torch REQUIRED
+  PATHS "${TORCH_ROOT}/share/cmake/Torch"
+  NO_DEFAULT_PATH  # Optional: Restrict to this path to avoid system-wide searches
+)
+add_subdirectory(rl_eco)
+
 add_subdirectory(ifp)
 add_subdirectory(pad)
 add_subdirectory(odb)
@@ -354,6 +370,8 @@ target_link_libraries(openroad
   mpl
   par
   est
+  rl_eco
+  ${TORCH_LIBRARIES}
   ${ABC_LIBRARY}
   ${TCL_LIBRARY}
   ${CMAKE_THREAD_LIBS_INIT}
