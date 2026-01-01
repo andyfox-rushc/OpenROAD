@@ -4,6 +4,8 @@
 // Generator Code Begin Cpp
 #include "dbModule.h"
 
+#include <cstdlib>
+
 #include "dbBlock.h"
 #include "dbCommon.h"
 #include "dbDatabase.h"
@@ -19,7 +21,7 @@
 // User Code Begin Includes
 #include <cassert>
 #include <cstddef>
-#include <cstdlib>
+#include <cstdint>
 #include <cstring>
 #include <map>
 #include <string>
@@ -92,10 +94,10 @@ dbIStream& operator>>(dbIStream& stream, _dbModule& obj)
   stream >> obj.insts_;
   stream >> obj.mod_inst_;
   stream >> obj.modinsts_;
-  if (obj.getDatabase()->isSchema(db_schema_update_hierarchy)) {
+  if (obj.getDatabase()->isSchema(kSchemaUpdateHierarchy)) {
     stream >> obj.modnets_;
   }
-  if (obj.getDatabase()->isSchema(db_schema_update_hierarchy)) {
+  if (obj.getDatabase()->isSchema(kSchemaUpdateHierarchy)) {
     stream >> obj.modbterms_;
   }
   return stream;
@@ -119,16 +121,19 @@ void _dbModule::collectMemInfo(MemInfo& info)
   info.size += sizeof(*this);
 
   // User Code Begin collectMemInfo
-  info.children_["name"].add(name_);
-  info.children_["_dbinst_hash"].add(dbinst_hash_);
-  info.children_["_modinst_hash"].add(modinst_hash_);
-  info.children_["_modbterm_hash"].add(modbterm_hash_);
-  info.children_["_modnet_hash"].add(modnet_hash_);
+  info.children["name"].add(name_);
+  info.children["_dbinst_hash"].add(dbinst_hash_);
+  info.children["_modinst_hash"].add(modinst_hash_);
+  info.children["_modbterm_hash"].add(modbterm_hash_);
+  info.children["_modnet_hash"].add(modnet_hash_);
   // User Code End collectMemInfo
 }
 
 _dbModule::~_dbModule()
 {
+  if (name_) {
+    free((void*) name_);
+  }
   // User Code Begin Destructor
   delete _port_iter;
   // User Code End Destructor
@@ -164,6 +169,12 @@ dbModInst* dbModule::getModInst() const
 }
 
 // User Code Begin dbModulePublicMethods
+
+dbModule* dbModule::getParentModule() const
+{
+  dbModInst* mod_inst = getModInst();
+  return (mod_inst != nullptr) ? mod_inst->getParent() : nullptr;
+}
 
 const dbModBTerm* dbModule::getHeadDbModBTerm() const
 {
@@ -245,7 +256,7 @@ void _dbModule::removeInst(dbInst* inst)
 {
   _dbModule* module = (_dbModule*) this;
   _dbInst* _inst = (_dbInst*) inst;
-  uint id = _inst->getOID();
+  uint32_t id = _inst->getOID();
 
   if (_inst->module_ != getOID()) {
     return;
@@ -304,7 +315,7 @@ dbModNet* dbModule::getModNet(const char* net_name) const
   const _dbBlock* block = (const _dbBlock*) module->getOwner();
   auto it = module->modnet_hash_.find(net_name);
   if (it != module->modnet_hash_.end()) {
-    uint db_id = (*it).second;
+    uint32_t db_id = (*it).second;
     return (dbModNet*) block->modnet_tbl_->getPtr(db_id);
   }
   return nullptr;
@@ -344,7 +355,7 @@ dbSet<dbModBTerm> dbModule::getModBTerms() const
   return dbSet<dbModBTerm>(module, block->module_modbterm_itr_);
 }
 
-dbModBTerm* dbModule::getModBTerm(uint id)
+dbModBTerm* dbModule::getModBTerm(uint32_t id)
 {
   _dbModule* module = (_dbModule*) this;
   _dbBlock* block = (_dbBlock*) module->getOwner();
@@ -368,14 +379,14 @@ dbModule* dbModule::create(dbBlock* block, const char* name)
   module->name_ = safe_strdup(name);
   _block->module_hash_.insert(module);
 
+  debugPrint(block->getImpl()->getLogger(),
+             utl::ODB,
+             "DB_EDIT",
+             1,
+             "EDIT: create {}",
+             module->getDebugName());
+
   if (_block->journal_) {
-    debugPrint(block->getImpl()->getLogger(),
-               utl::ODB,
-               "DB_ECO",
-               1,
-               "ECO: create dbModule {} at id {}",
-               module->name_,
-               module->getId());
     _block->journal_->beginAction(dbJournal::kCreateObject);
     _block->journal_->pushParam(dbModuleObj);
     _block->journal_->pushParam(module->name_);
@@ -457,17 +468,17 @@ void dbModule::destroy(dbModule* module)
 
   dbProperty::destroyProperties(_module);
 
+  debugPrint(block->getImpl()->getLogger(),
+             utl::ODB,
+             "DB_EDIT",
+             1,
+             "EDIT: delete {}",
+             module->getDebugName());
+
   // Journal the deletion of the dbModule after its ports
   // and properties deleted, so that on restore we have
   // dbModule to hang objects on.
   if (block->journal_) {
-    debugPrint(block->getImpl()->getLogger(),
-               utl::ODB,
-               "DB_ECO",
-               1,
-               "ECO: delete dbModule {} at id {}",
-               module->getName(),
-               module->getId());
     block->journal_->beginAction(dbJournal::kDeleteObject);
     block->journal_->pushParam(dbModuleObj);
     block->journal_->pushParam(module->getName());
@@ -479,7 +490,7 @@ void dbModule::destroy(dbModule* module)
   block->module_tbl_->destroy(_module);
 }
 
-dbModule* dbModule::getModule(dbBlock* block_, uint dbid_)
+dbModule* dbModule::getModule(dbBlock* block_, uint32_t dbid_)
 {
   _dbBlock* block = (_dbBlock*) block_;
   return (dbModule*) block->module_tbl_->getPtr(dbid_);
@@ -686,7 +697,7 @@ void _dbModule::copyModulePorts(dbModule* old_module,
   utl::Logger* logger = old_module->getImpl()->getLogger();
   for (dbModBTerm* old_port : old_module->getModBTerms()) {
     dbModBTerm* new_port = nullptr;
-    if (mod_bt_map.count(old_port) > 0) {
+    if (mod_bt_map.contains(old_port)) {
       new_port = mod_bt_map[old_port];
       debugPrint(logger,
                  utl::ODB,
@@ -973,7 +984,7 @@ void _dbModule::copyModuleModNets(dbModule* old_module,
     // Connect dbModBTerms to new mod net
     for (dbModBTerm* old_mbterm : old_net->getModBTerms()) {
       dbModBTerm* new_mbterm = nullptr;
-      if (mod_bt_map.count(old_mbterm) > 0) {
+      if (mod_bt_map.contains(old_mbterm)) {
         new_mbterm = mod_bt_map[old_mbterm];
       }
       if (new_mbterm) {
@@ -1007,7 +1018,7 @@ void _dbModule::copyModuleModNets(dbModule* old_module,
                old_net->getITerms().size());
     for (dbITerm* old_iterm : old_net->getITerms()) {
       dbITerm* new_iterm = nullptr;
-      if (it_map.count(old_iterm) > 0) {
+      if (it_map.contains(old_iterm)) {
         new_iterm = it_map[old_iterm];
       }
       if (new_iterm) {

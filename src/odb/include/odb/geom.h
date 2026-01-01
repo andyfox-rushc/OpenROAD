@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -13,7 +14,6 @@
 #include <vector>
 
 #include "odb/isotropy.h"
-#include "odb/odb.h"
 #include "utl/Logger.h"
 
 namespace odb {
@@ -217,6 +217,7 @@ class Cuboid
   int yhi_ = 0;
   int zhi_ = 0;
 };
+std::ostream& operator<<(std::ostream& os, const Cuboid& cIn);
 
 /*
 an Oct represents a 45-degree routing segment as 2 connected octagons

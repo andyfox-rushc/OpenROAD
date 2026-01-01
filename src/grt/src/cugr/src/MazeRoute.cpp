@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cassert>
-#include <cstdint>
 #include <cstdio>
 #include <limits>
 #include <memory>
@@ -220,7 +219,12 @@ void MazeRoute::run()
     }
 
     solutions_.emplace_back(foundSolution);
-    assert(foundPinIndex >= 0);
+    if (foundPinIndex == -1) {
+      logger_->error(utl::GRT,
+                     282,
+                     "Failed to find connected pin on net {}.",
+                     net_->getName());
+    }
     visited[foundPinIndex] = true;
     numDetached -= 1;
 
@@ -266,7 +270,13 @@ std::shared_ptr<SteinerTreeNode> MazeRoute::getSteinerTree() const
         if (!lastNode || !temp->prev) {
           // Both the start and the end of the path should contain pins
           const int pinIndex = graph_.getVertexPin(temp->vertex);
-          assert(pinIndex != -1);
+          if (pinIndex == -1) {
+            logger_->error(utl::GRT,
+                           284,
+                           "Pin index not found for vertex {} on net {}.",
+                           temp->vertex,
+                           net_->getName());
+          }
           node->setFixedLayers(graph_.getPseudoPin(pinIndex).layers);
         }
         lastNode = std::move(node);
@@ -279,7 +289,13 @@ std::shared_ptr<SteinerTreeNode> MazeRoute::getSteinerTree() const
       }
     }
   }
-  assert(tree);
+
+  if (tree == nullptr) {
+    logger_->error(utl::GRT,
+                   285,
+                   "Steiner tree construction failed for net {}.",
+                   net_->getName());
+  }
 
   // Remove redundant tree nodes
   SteinerTreeNode::preorder(

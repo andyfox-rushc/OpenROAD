@@ -23,6 +23,8 @@ or_integration_tests(
     est_rc2
     est_rc3
     est_rc4
+    est_rc_cugr1
+    estimate_path_resistance
     gcd
     gcd_cugr
     gcd_flute
@@ -44,7 +46,9 @@ or_integration_tests(
     pd3
     pd4
     pin_access1
+    pin_access1_cugr
     pin_access2
+    pin_access2_cugr
     pin_edge
     pin_track_not_aligned
     pre_routed1

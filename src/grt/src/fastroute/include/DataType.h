@@ -55,22 +55,15 @@ struct Segment  // A Segment is a 2-pin connection
           int16_t x2,
           int16_t y2,
           int8_t cost)
-      : netID(netID),
-        x1(x1),
-        y1(y1),
-        x2(x2),
-        y2(y2),
-        cost(cost),
-        xFirst(false),
-        HVH(false)
+      : netID(netID), x1(x1), y1(y1), x2(x2), y2(y2), cost(cost)
   {
   }
   const int netID;
   const int16_t x1, y1, x2, y2;  // coordinates of two endpoints (x1 <= x2)
-  int16_t Zpoint;     // The coordinates of Z point (x for HVH and y for VHV)
-  const int8_t cost;  // the netID of the net this segment belonging to
-  bool xFirst : 1;    // route x-direction first (only for L route)
-  bool HVH : 1;       // TRUE = HVH or false = VHV (only for Z route)
+  int16_t Zpoint{-1};  // The coordinates of Z point (x for HVH and y for VHV)
+  const int8_t cost;   // the netID of the net this segment belonging to
+  bool xFirst : 1 {false};  // route x-direction first (only for L route)
+  bool HVH : 1 {false};     // TRUE = HVH or false = VHV (only for Z route)
 };
 
 struct FrNet  // A Net is a set of connected MazePoints
@@ -174,8 +167,8 @@ struct TreeNode
   int nbr_count = 0;
   int nbr[3];   // three neighbors
   int edge[3];  // three adjacent edges
-  int hID;
-  int lID;
+  int hID = -1;
+  int lID = -1;
   // If two nodes are at the same x & y then the duplicate will have
   // stackAlias set to the index of the first node.  This does not
   // apply to pins nodes, only Steiner nodes.
@@ -219,7 +212,7 @@ struct TreeEdge
 {
   bool assigned;
 
-  int len;  // the Manhanttan Distance for two end nodes
+  int len = 0;  // the Manhanttan Distance for two end nodes
   int n1, n1a;
   int n2, n2a;
   Route route;

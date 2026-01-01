@@ -121,15 +121,21 @@ void Grid::makeShapes(const Shape::ShapeTreeMap& global_shapes,
 
   Shape::ShapeTreeMap local_shapes = global_shapes;
   // make shapes
+  std::vector<GridComponent*> deferred;
   for (auto* component : getGridComponents()) {
-    // make initial shapes
-    component->makeShapes(local_shapes);
-    // cut shapes to avoid obstructions
-    component->cutShapes(local_obstructions);
-    // add shapes and obstructions to they are accounted for in future
-    // components
-    component->getObstructions(local_obstructions);
-    component->getShapes(local_shapes);
+    if (!component->make(local_shapes, local_obstructions)) {
+      debugPrint(logger,
+                 utl::PDN,
+                 "Make",
+                 2,
+                 "Deferring shape creation for component in \"{}\".",
+                 getName());
+      deferred.push_back(component);
+    }
+  }
+  // make deferred components
+  for (auto* component : deferred) {
+    component->make(local_shapes, local_obstructions);
   }
 
   // refine shapes
@@ -453,9 +459,21 @@ void Grid::report() const
     }
   }
   if (!connect_.empty()) {
+    std::vector<Connect*> connect;
+    connect.reserve(connect_.size());
+    for (const auto& conn : connect_) {
+      connect.push_back(conn.get());
+    }
+    std::ranges::sort(connect, [](const Connect* l, const Connect* r) {
+      int l_lower = l->getLowerLayer()->getRoutingLevel();
+      int l_upper = l->getUpperLayer()->getRoutingLevel();
+      int r_lower = r->getLowerLayer()->getRoutingLevel();
+      int r_upper = r->getUpperLayer()->getRoutingLevel();
+      return std::tie(l_lower, l_upper) < std::tie(r_lower, r_upper);
+    });
     logger->report("Connect:");
-    for (const auto& connect : connect_) {
-      connect->report();
+    for (Connect* conn : connect) {
+      conn->report();
     }
   }
   if (!pin_layers_.empty()) {
@@ -505,10 +523,10 @@ void Grid::getIntersections(std::vector<ViaPtr>& shape_intersections,
     odb::dbTechLayer* upper_layer = connect->getUpperLayer();
 
     // check if both layers have shapes
-    if (shapes.count(lower_layer) == 0) {
+    if (!shapes.contains(lower_layer)) {
       continue;
     }
-    if (shapes.count(upper_layer) == 0) {
+    if (!shapes.contains(upper_layer)) {
       continue;
     }
 
@@ -829,7 +847,7 @@ void Grid::makeVias(const Shape::ShapeTreeMap& global_shapes,
   auto remove_set_of_vias = [&vias](std::set<ViaPtr>& remove_vias) {
     auto remove
         = std::remove_if(vias.begin(), vias.end(), [&](const ViaPtr& via) {
-            return remove_vias.count(via) != 0;
+            return remove_vias.contains(via);
           });
     vias.erase(remove, vias.end());
     remove_vias.clear();

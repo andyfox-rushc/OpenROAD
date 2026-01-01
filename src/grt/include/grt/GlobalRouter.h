@@ -19,6 +19,7 @@
 #include "grt/RoutePt.h"
 #include "odb/db.h"
 #include "odb/dbBlockCallBackObj.h"
+#include "odb/dbObject.h"
 #include "odb/geom.h"
 #include "sta/Liberty.hh"
 
@@ -164,6 +165,7 @@ class GlobalRouter
   void readGuides(const char* file_name);
   void loadGuidesFromDB();
   void ensurePinsPositions(odb::dbNet* db_net);
+  bool findCoveredAccessPoint(const Net* net, Pin& pin);
   void saveGuidesFromFile(std::unordered_map<odb::dbNet*, Guides>& guides);
   void saveGuides(const std::vector<odb::dbNet*>& nets);
   void writeSegments(const char* file_name);
@@ -286,9 +288,23 @@ class GlobalRouter
   void createWLReportFile(const char* file_name, bool verbose);
   std::vector<PinGridLocation> getPinGridPositions(odb::dbNet* db_net);
 
+  // Report wire resistance
+  float getLayerResistance(int layer, int length, odb::dbNet* net);
+  float getViaResistance(int from_layer, int to_layer);
+  double dbuToMicrons(int dbu);
+  float estimatePathResistance(odb::dbObject* pin1,
+                               odb::dbObject* pin2,
+                               bool verbose = false);
+  float estimatePathResistance(odb::dbObject* pin1,
+                               odb::dbObject* pin2,
+                               odb::dbTechLayer* layer1,
+                               odb::dbTechLayer* layer2,
+                               bool verbose = false);
+
   bool findPinAccessPointPositions(
       const Pin& pin,
-      std::map<int, std::vector<PointPair>>& ap_positions);
+      std::map<int, std::vector<PointPair>>& ap_positions,
+      bool all_access_points = false);
   void getNetLayerRange(odb::dbNet* db_net, int& min_layer, int& max_layer);
   void getGridSize(int& x_grids, int& y_grids);
   int getGridTileSize();
@@ -374,6 +390,7 @@ class GlobalRouter
                                 Pin& pin,
                                 odb::Point& pos_on_grid,
                                 bool has_access_points);
+  void updatePinAccessPoints();
   void suggestAdjustment();
   void findFastRoutePins(Net* net,
                          std::vector<RoutePt>& pins_on_grid,
@@ -471,7 +488,6 @@ class GlobalRouter
   void initClockNets();
   bool isClkTerm(odb::dbITerm* iterm, sta::dbNetwork* network);
   void initGridAndNets();
-  void ensureLayerForGuideDimension(int max_routing_layer);
   void configFastRoute();
 
   utl::Logger* logger_;
@@ -495,7 +511,6 @@ class GlobalRouter
   // Flow variables
   bool is_incremental_;
   float adjustment_;
-  int layer_for_guide_dimension_;
   int congestion_iterations_{50};
   int congestion_report_iter_step_;
   bool allow_congestion_;
