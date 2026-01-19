@@ -9,11 +9,11 @@ include("openroad")
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 
 find_package(Eigen3 REQUIRED)
-find_package(ortools REQUIRED)
+#find_package(ortools REQUIRED)
 find_package(LEMON NAMES LEMON lemon REQUIRED)
 find_package(OpenMP REQUIRED)
 
-message(STATUS "Found OR-Tools: ${ortools_DIR} (version: ${ortools_VERSION})")
+#message(STATUS "Found OR-Tools: ${ortools_DIR} (version: ${ortools_VERSION})")
 
 swig_lib(NAME      gpl
          NAMESPACE gpl
@@ -68,7 +68,7 @@ target_link_libraries(gpl_lib
     OpenSTA
     rsz_lib
     grt_lib
-    ortools::ortools
+#    ortools::ortools
     Threads::Threads
     OpenMP::OpenMP_CXX
 )
@@ -83,7 +83,7 @@ target_link_libraries(gpl
     OpenSTA
     rsz
     grt
-    ortools::ortools
+#    ortools::ortools
     Threads::Threads
     OpenMP::OpenMP_CXX
 )

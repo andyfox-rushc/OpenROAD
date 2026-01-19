@@ -11,12 +11,12 @@
 namespace ord {
 // Defined in OpenRoad.i
 mpl::MacroPlacer*
-getMacroPlacer();
+  //getMacroPlacer();
 utl::Logger* getLogger();
 }
 
 using utl::MPL;
-using ord::getMacroPlacer;
+//using ord::getMacroPlacer;
 %}
 
 %include "../../Exception.i"

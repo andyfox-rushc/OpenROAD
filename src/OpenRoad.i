@@ -115,20 +115,24 @@ getTritonCts()
   return openroad->getTritonCts();
 }
 
+/*
 mpl::MacroPlacer *
 getMacroPlacer()
 {
   OpenRoad *openroad = getOpenRoad();
   return openroad->getMacroPlacer();
 }
-
+*/
+  /*
 gpl::Replace*
 getReplace()
 {
   OpenRoad *openroad = getOpenRoad();
   return openroad->getReplace();
 }
+  */
 
+     
 rcx::Ext *
 getOpenRCX()
 {
@@ -171,13 +175,14 @@ getIOPlacer()
   return openroad->getIOPlacer();
 }
 
+/*
 par::PartitionMgr*
 getPartitionMgr()
 {
   OpenRoad *openroad = getOpenRoad();
   return openroad->getPartitionMgr();
 }
-
+*/
 pdn::PdnGen*
 getPdnGen()
 {

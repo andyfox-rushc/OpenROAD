@@ -56,7 +56,6 @@ using std::string;
   X(utl)                                 \
   X(ant)                                 \
   X(grt)                                 \
-  X(gpl)                                 \
   X(dpl)                                 \
   X(exa)                                 \
   X(ppl)                                 \
@@ -64,7 +63,6 @@ using std::string;
   X(cts)                                 \
   X(drt)                                 \
   X(fin)                                 \
-  X(par)                                 \
   X(rcx)                                 \
   X(rmp)                                 \
   X(cgt)                                 \

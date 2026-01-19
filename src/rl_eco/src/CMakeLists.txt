@@ -6,6 +6,7 @@ target_sources(rl_eco
   PRIVATE
   EcoEnvironment.cpp
   EcoAgent.cpp
+  rl_example.cpp
     # Add all your .cpp files here
     # If you have mains for executables, see below
 )

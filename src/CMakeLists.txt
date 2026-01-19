@@ -4,10 +4,10 @@
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${PROJECT_SOURCE_DIR}/src/cmake")
 
 # The location used by etc/DependencyInstaller.sh
-list(APPEND CMAKE_PREFIX_PATH
-  "/opt/or-tools/lib64/cmake"
-  "/opt/or-tools/lib/cmake"
-)
+#list(APPEND CMAKE_PREFIX_PATH
+#  "/opt/or-tools/lib64/cmake"
+#  "/opt/or-tools/lib/cmake"
+#)
 
 # Link to where ortools was found
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
@@ -250,9 +250,8 @@ if(POLICY CMP0144)
 endif()
 
 # Optionally set TORCH_ROOT if not provided (fallback)
-if(NOT DEFINED TORCH_ROOT)
-  set(TORCH_ROOT "~/libtorch")  # Default path; adjust if needed
-endif()
+set(TORCH_ROOT "~/libtorch-custom")  # Default path; adjust if needed
+
 # Find LibTorch (use PATHS with the variable for flexibility)
 find_package(Torch REQUIRED
   PATHS "${TORCH_ROOT}/share/cmake/Torch"
@@ -275,7 +274,7 @@ add_subdirectory(dbSta)
 add_subdirectory(rsz)
 add_subdirectory(tst)
 add_subdirectory(stt)
-add_subdirectory(gpl)
+#add_subdirectory(gpl)
 add_subdirectory(dpl)
 add_subdirectory(exa)
 add_subdirectory(fin)
@@ -297,8 +296,8 @@ add_subdirectory(utl)
 add_subdirectory(dst)
 add_subdirectory(pdn)
 add_subdirectory(dft)
-add_subdirectory(mpl)
-add_subdirectory(par)
+#add_subdirectory(mpl)
+#add_subdirectory(par)
 add_subdirectory(est)
 
 ################################################################
@@ -339,7 +338,7 @@ target_link_libraries(openroad
   ifp
   pad
   ord
-  gpl
+#  gpl
   dpl
   exa
   fin
@@ -367,8 +366,8 @@ target_link_libraries(openroad
   utl
   pdn
   dft
-  mpl
-  par
+#  mpl
+#  par
   est
   rl_eco
   ${TORCH_LIBRARIES}
@@ -433,7 +432,7 @@ if (Python3_FOUND AND BUILD_PYTHON)
     utl_py
     ant_py
     grt_py
-    gpl_py
+#    gpl_py
     dpl_py
     exa_py
     ppl_py
@@ -449,7 +448,7 @@ if (Python3_FOUND AND BUILD_PYTHON)
     psm_py
     pdn_py
     dft_py
-    par_py
+#    par_py
   )
 
 else()

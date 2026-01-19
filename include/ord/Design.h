@@ -167,13 +167,13 @@ class Design
   exa::Example* getExample();
   drt::TritonRoute* getTritonRoute();
   fin::Finale* getFinale();
-  gpl::Replace* getReplace();
+  //  gpl::Replace* getReplace();
   grt::GlobalRouter* getGlobalRouter();
   ifp::InitFloorplan getFloorplan();
-  mpl::MacroPlacer* getMacroPlacer();
+  //  mpl::MacroPlacer* getMacroPlacer();
   odb::dbDatabase* getDb();
   pad::ICeWall* getICeWall();
-  par::PartitionMgr* getPartitionMgr();
+  //  par::PartitionMgr* getPartitionMgr();
   pdn::PdnGen* getPdnGen();
   ppl::IOPlacer* getIOPlacer();
   psm::PDNSim* getPDNSim();

@@ -72,13 +72,13 @@ namespace exa {
 class Example;
 }
 
-namespace mpl {
-class MacroPlacer;
-}
+//namespace mpl {
+//class MacroPlacer;
+//}
 
-namespace gpl {
-class Replace;
-}
+//namespace gpl {
+//class Replace;
+//}
 
 namespace rcx {
 class Ext;
@@ -96,9 +96,9 @@ namespace ant {
 class AntennaChecker;
 }
 
-namespace par {
-class PartitionMgr;
-}
+//namespace par {
+//class PartitionMgr;
+//}
 
 namespace pdn {
 class PdnGen;
@@ -162,14 +162,14 @@ class OpenRoad
   fin::Finale* getFinale() { return finale_; }
   ram::RamGen* getRamGen() { return ram_gen_; }
   tap::Tapcell* getTapcell() { return tapcell_; }
-  mpl::MacroPlacer* getMacroPlacer() { return macro_placer_; }
+  //  mpl::MacroPlacer* getMacroPlacer() { return macro_placer_; }
   exa::Example* getExample() { return example_; }
   rcx::Ext* getOpenRCX() { return extractor_; }
   drt::TritonRoute* getTritonRoute() { return detailed_router_; }
-  gpl::Replace* getReplace() { return replace_; }
+  //  gpl::Replace* getReplace() { return replace_; }
   psm::PDNSim* getPDNSim() { return pdnsim_; }
   grt::GlobalRouter* getGlobalRouter() { return global_router_; }
-  par::PartitionMgr* getPartitionMgr() { return partitionMgr_; }
+  //  par::PartitionMgr* getPartitionMgr() { return partitionMgr_; }
   ant::AntennaChecker* getAntennaChecker() { return antenna_checker_; }
   ppl::IOPlacer* getIOPlacer() { return ioPlacer_; }
   pdn::PdnGen* getPdnGen() { return pdngen_; }
@@ -265,7 +265,7 @@ class OpenRoad
   dpl::Opendp* opendp_ = nullptr;
   fin::Finale* finale_ = nullptr;
   ram::RamGen* ram_gen_ = nullptr;
-  mpl::MacroPlacer* macro_placer_ = nullptr;
+  //  mpl::MacroPlacer* macro_placer_ = nullptr;
   exa::Example* example_ = nullptr;
   grt::GlobalRouter* global_router_ = nullptr;
   cgt::ClockGating* clock_gating_ = nullptr;
@@ -275,9 +275,9 @@ class OpenRoad
   rcx::Ext* extractor_ = nullptr;
   drt::TritonRoute* detailed_router_ = nullptr;
   ant::AntennaChecker* antenna_checker_ = nullptr;
-  gpl::Replace* replace_ = nullptr;
+  //  gpl::Replace* replace_ = nullptr;
   psm::PDNSim* pdnsim_ = nullptr;
-  par::PartitionMgr* partitionMgr_ = nullptr;
+  //  par::PartitionMgr* partitionMgr_ = nullptr;
   pdn::PdnGen* pdngen_ = nullptr;
   pad::ICeWall* icewall_ = nullptr;
   dst::Distributed* distributer_ = nullptr;

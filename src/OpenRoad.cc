@@ -44,14 +44,14 @@
 #include "exa/example.h"
 #include "fin/Finale.h"
 #include "fin/MakeFinale.h"
-#include "gpl/MakeReplace.h"
-#include "gpl/Replace.h"
+//#include "gpl/MakeReplace.h"
+//#include "gpl/Replace.h"
 #include "grt/GlobalRouter.h"
 #include "grt/MakeGlobalRouter.h"
 #include "gui/MakeGui.h"
 #include "ifp/MakeInitFloorplan.hh"
-#include "mpl/MakeMacroPlacer.h"
-#include "mpl/rtl_mp.h"
+//#include "mpl/MakeMacroPlacer.h"
+//#include "mpl/rtl_mp.h"
 #include "odb/3dblox.h"
 #include "odb/MakeOdb.h"
 #include "odb/cdl.h"
@@ -62,8 +62,8 @@
 #include "odb/lefout.h"
 #include "ord/InitOpenRoad.hh"
 #include "pad/MakeICeWall.h"
-#include "par/MakePartitionMgr.h"
-#include "par/PartitionMgr.h"
+//#include "par/MakePartitionMgr.h"
+//#include "par/PartitionMgr.h"
 #include "pdn/MakePdnGen.hh"
 #include "pdn/PdnGen.hh"
 #include "ppl/IOPlacer.h"
@@ -100,6 +100,8 @@ extern "C" {
 extern int Ord_Init(Tcl_Interp* interp);
 }
 
+extern int rl_main();
+
 namespace ord {
 
 using odb::dbChip;
@@ -129,17 +131,17 @@ OpenRoad::~OpenRoad()
   delete clock_gating_;
   delete tritonCts_;
   delete tapcell_;
-  delete macro_placer_;
+  //  delete macro_placer_;
   delete example_;
   delete extractor_;
   delete detailed_router_;
-  delete replace_;
+  //  delete replace_;
   delete pdnsim_;
   delete finale_;
   delete ram_gen_;
   delete antenna_checker_;
   odb::dbDatabase::destroy(db_);
-  delete partitionMgr_;
+  //  delete partitionMgr_;
   delete pdngen_;
   delete icewall_;
   delete distributer_;
@@ -189,7 +191,8 @@ void OpenRoad::init(Tcl_Interp* tcl_interp,
                     const bool batch_mode)
 {
   tcl_interp_ = tcl_interp;
-
+  printf("rl_main\n");
+  //  rl_main();
   // Make components.
   utl::Progress::setBatchMode(batch_mode);
   logger_ = new utl::Logger(log_filename, metrics_filename);
@@ -234,16 +237,16 @@ void OpenRoad::init(Tcl_Interp* tcl_interp,
                                   resizer_,
                                   estimate_parasitics_);
   tapcell_ = new tap::Tapcell(db_, logger_);
-  partitionMgr_ = new par::PartitionMgr(db_, getDbNetwork(), sta_, logger_);
-  macro_placer_
-      = new mpl::MacroPlacer(getDbNetwork(), db_, sta_, logger_, partitionMgr_);
+  //  partitionMgr_ = nullptr;//new par::PartitionMgr(db_, getDbNetwork(), sta_, logger_);
+  //  macro_placer_ = nullptr;
+  //      = new mpl::MacroPlacer(getDbNetwork(), db_, sta_, logger_, partitionMgr_);
   extractor_ = new rcx::Ext(db_, logger_, getVersion());
   distributer_ = new dst::Distributed(logger_);
   detailed_router_ = new drt::TritonRoute(
       db_, logger_, callback_handler_, distributer_, stt_builder_);
   drt::initGui(detailed_router_);
 
-  replace_ = new gpl::Replace(db_, sta_, resizer_, global_router_, logger_);
+  //  replace_ = new gpl::Replace(db_, sta_, resizer_, global_router_, logger_);
   pdnsim_ = new psm::PDNSim(logger_, db_, sta_, estimate_parasitics_, opendp_);
   pdngen_ = new pdn::PdnGen(db_, logger_);
   icewall_ = new pad::ICeWall(db_, logger_);
@@ -265,15 +268,15 @@ void OpenRoad::init(Tcl_Interp* tcl_interp,
   sta::initDbSta(tcl_interp);
   rsz::initResizer(tcl_interp);
   ppl::initIoplacer(tcl_interp);
-  gpl::initReplace(tcl_interp);
-  gpl::initReplaceGraphics(replace_, logger_);
+  //  gpl::initReplace(tcl_interp);
+  //  gpl::initReplaceGraphics(replace_, logger_);
   dpl::initOpendp(tcl_interp);
   fin::initFinale(tcl_interp);
   ram::initRamGen(tcl_interp);
   grt::initTcl(tcl_interp);
   cts::initTritonCts(tcl_interp);
   tap::initTapcell(tcl_interp);
-  mpl::initMacroPlacer(tcl_interp);
+  //  mpl::initMacroPlacer(tcl_interp);
   exa::initExample(tcl_interp);
   rcx::initOpenRCX(tcl_interp);
   pad::initICeWall(tcl_interp);
@@ -282,7 +285,7 @@ void OpenRoad::init(Tcl_Interp* tcl_interp,
   drt::initTcl(tcl_interp);
   psm::initPDNSim(tcl_interp);
   ant::initAntennaChecker(tcl_interp);
-  par::initPartitionMgr(tcl_interp);
+  //  par::initPartitionMgr(tcl_interp);
   pdn::initPdnGen(tcl_interp);
   dst::initDistributed(tcl_interp);
   stt::initSteinerTreeBuilder(tcl_interp);

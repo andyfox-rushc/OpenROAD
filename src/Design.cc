@@ -245,10 +245,12 @@ grt::GlobalRouter* Design::getGlobalRouter()
   return getOpenRoad()->getGlobalRouter();
 }
 
+/*
 gpl::Replace* Design::getReplace()
 {
   return getOpenRoad()->getReplace();
 }
+*/
 
 dpl::Opendp* Design::getOpendp()
 {
@@ -260,10 +262,13 @@ exa::Example* Design::getExample()
   return getOpenRoad()->getExample();
 }
 
+/*
 mpl::MacroPlacer* Design::getMacroPlacer()
 {
   return getOpenRoad()->getMacroPlacer();
 }
+*/
+
 
 ppl::IOPlacer* Design::getIOPlacer()
 {
@@ -295,10 +300,12 @@ fin::Finale* Design::getFinale()
   return getOpenRoad()->getFinale();
 }
 
+/*
 par::PartitionMgr* Design::getPartitionMgr()
 {
   return getOpenRoad()->getPartitionMgr();
 }
+*/
 
 rcx::Ext* Design::getOpenRCX()
 {

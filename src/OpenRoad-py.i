@@ -57,7 +57,7 @@ get_db_block();
 %include "ord/Timing.h"
 
 #ifdef BAZEL
-%include "src/gpl/src/replace-py.i"
+ //%include "src/gpl/src/replace-py.i"
 %include "src/ifp/src/InitFloorplan-py.i"
 %include "src/ant/src/AntennaChecker-py.i"
 %include "src/cts/src/TritonCTS-py.i"
@@ -66,7 +66,7 @@ get_db_block();
 %include "src/exa/src/example-py.i"
 %include "src/fin/src/finale-py.i"
 %include "src/grt/src/GlobalRouter-py.i"
-%include "src/par/src/partitionmgr-py.i"
+//%include "src/par/src/partitionmgr-py.i"
 %include "src/pdn/src/PdnGen-py.i"
 %include "src/ppl/src/IOPlacer-py.i"
 %include "src/psm/src/pdnsim-py.i"
