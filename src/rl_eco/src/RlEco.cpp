@@ -139,7 +139,7 @@ void RlEco::trainAgent(int episodes,
   config.congestion_weight = congestion_weight_;
   
   // Create trainer
-  trainer_ = std::make_unique<EcoQLearningTrainer>(design_manager_, config);
+  trainer_ = std::make_unique<EcoQLearningTrainer>(design_manager_, config,logger_);
   
   logger_->info(utl::RLE, 6, "Starting RL training:");
   logger_->info(utl::RLE, 7, "  Episodes: {}", episodes);
@@ -221,7 +221,7 @@ void RlEco::loadModel(const char* filepath)
   if (!trainer_) {
     QLearningConfig config;
     config.hidden_layers = hidden_layers_;
-    trainer_ = std::make_unique<EcoQLearningTrainer>(design_manager_, config);
+    trainer_ = std::make_unique<EcoQLearningTrainer>(design_manager_, config,logger_);
   }
   
   trainer_->loadAgent(filepath);
@@ -409,7 +409,7 @@ void RlEco::trainOnDataset(int epochs) {
         config.batch_size = batch_size_;
         config.replay_buffer_size = replay_buffer_size_;
         config.max_episodes = epochs * training_scenarios_.size();
-        trainer_ = std::make_unique<EcoQLearningTrainer>(design_manager_, config);
+        trainer_ = std::make_unique<EcoQLearningTrainer>(design_manager_, config,logger_);
     }
     
     logger_->info(utl::RLE, 33, "Starting dataset training: {} epochs on {} scenarios", 

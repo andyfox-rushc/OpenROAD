@@ -267,6 +267,32 @@ double EcoRLEnvironment::calculateReward(const EcoState& prev_state,
                                         const EcoState& curr_state,
                                         const EcoAction& action) const {
     double reward = 0.0;
+
+    //debug information
+    // Calculate components
+    bool change_implemented = curr_state.num_unimplemented_changes < prev_state.num_unimplemented_changes;
+    double timing_improvement = curr_state.current_timing_slack - prev_state.current_timing_slack;
+    double wirelength_increase = curr_state.total_wirelength - prev_state.total_wirelength;
+    
+    // Apply rewards/penalties
+    if (change_implemented) {
+        reward += CHANGE_IMPLEMENTED_REWARD;
+        logger_->info(utl::ECO, 995, "Change implemented! +{}", CHANGE_IMPLEMENTED_REWARD);
+    }
+    
+    if (timing_improvement > 0) {
+        double timing_reward = TIMING_IMPROVEMENT_REWARD * timing_improvement;
+        reward += timing_reward;
+        logger_->info(utl::ECO, 994, "Timing improved by {:.2f}! +{:.2f}", 
+                      timing_improvement, timing_reward);
+    }
+    
+    if (action.type == EcoAction::SKIP_CHANGE) {
+        reward += SKIP_PENALTY;
+        logger_->info(utl::ECO, 993, "Skipped change! {}", SKIP_PENALTY);
+    }
+    
+
     
     // Reward for implementing a change
     if (curr_state.num_unimplemented_changes < prev_state.num_unimplemented_changes) {
@@ -285,7 +311,7 @@ double EcoRLEnvironment::calculateReward(const EcoState& prev_state,
     }
     
     // Wirelength penalty
-    double wirelength_increase = curr_state.total_wirelength - prev_state.total_wirelength;
+    wirelength_increase = curr_state.total_wirelength - prev_state.total_wirelength;
     if (wirelength_increase > 0) {
         reward += WIRELENGTH_PENALTY * wirelength_increase;
     }

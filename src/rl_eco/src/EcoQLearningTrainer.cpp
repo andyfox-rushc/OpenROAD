@@ -4,6 +4,7 @@
 #include "rl_eco/EcoRLEnvironment.h"
 #include "rl_eco/EcoDesignManager.h"
 #include "rl_eco/DQNAgent.h"  // Include for QLearningConfig
+#include "utl/Logger.h"
 
 #include <iostream>
 #include <fstream>
@@ -17,11 +18,13 @@
 namespace eco {
 
 EcoQLearningTrainer::EcoQLearningTrainer(std::shared_ptr<EcoDesignManager> manager,
-                                       const QLearningConfig& config)
+					 const QLearningConfig& config,
+					 utl::Logger* logger)
     : manager_(manager), 
       config_(config),
       total_steps_(0),
-      best_episode_reward_(-std::numeric_limits<double>::infinity()) {
+      best_episode_reward_(-std::numeric_limits<double>::infinity()),
+      logger_(logger) {
     
     env_ = std::make_unique<EcoRLEnvironment>(manager, manager->logger());
     
@@ -64,6 +67,24 @@ void EcoQLearningTrainer::trainEpisode() {
         
         // Get valid actions
         auto valid_actions_enum = env_->getValidActions(state);
+
+	logger_->info(utl::ECO, 998, "Step {}: State - {} changes left, {} spares, type: {}",
+                      steps, state.num_unimplemented_changes, 
+                      state.num_available_spare_cells,
+                      state.current_change_type);
+        // Get Q-values for all actions (before selection)
+        auto q_values = agent_->getQValues(state_features);
+        
+        // DEBUG: Log Q-values for valid actions
+        logger_->info(utl::ECO, 999, "Q-values for valid actions:");
+        for (size_t i = 0; i < valid_actions_enum.size(); ++i) {
+            const auto& action = valid_actions_enum[i];
+            size_t idx = action.toIndex();
+            if (idx < q_values.size()) {
+                logger_->info(utl::ECO, 999, "  {} : Q = {:.2f}", 
+                             action.toString(), q_values[idx]);
+            }
+        }
         std::vector<size_t> valid_actions;
         for (const auto& action : valid_actions_enum) {
             valid_actions.push_back(action.toIndex());
