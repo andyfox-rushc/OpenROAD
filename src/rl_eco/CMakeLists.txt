@@ -1,31 +1,43 @@
-## SPDX-License-Identifier: BSD-3-Clause
-## Copyright (c) 2025, The OpenROAD Authors
+# src/rl_eco/CMakeLists.txt
 
-# Define the rl_eco library target here (before subdirectories)
-add_library(rl_eco STATIC)  # Or SHARED if you prefer a .so
+include("openroad")
 
-# Set properties for the target (e.g., C++ standard, includes)
+swig_lib(NAME      rl_eco
+         NAMESPACE eco
+         I_FILE    src/RlEco.i
+         SCRIPTS   src/RlEco.tcl
+)
+
+target_sources(rl_eco
+  PRIVATE
+    src/EcoChangeSet.cpp
+    src/EcoDesignManager.cpp
+    src/EcoQLearningTrainer.cpp
+    src/DQNAgent.cpp
+    src/EcoNeuralNetwork.cpp
+    src/EcoRLEnvironment.cpp
+    src/RlEco.cpp
+    src/MakeRlEco.cpp
+)
+
 target_include_directories(rl_eco
   PUBLIC
-  ../include
-  ${PROJECT_SOURCE_DIR}/include
-  PRIVATE
-    # Unfortunate side-effect of swig include StaTcl.i
-    ${OPENSTA_HOME}/include/sta
-    ${OPENSTA_HOME}
+    include
 )
 
-target_compile_features(rl_eco PUBLIC cxx_std_17)  # Or cxx_std_20 if needed
-
-# Link dependencies (LibTorch, OpenROAD internals)
 target_link_libraries(rl_eco
-    PRIVATE
-    ${TORCH_LIBRARIES}  # From find_package(Torch)
-    OpenSTA
+  PRIVATE
     odb
-    utl_lib
-    dbSta_lib  
+    OpenSTA
+    dbSta
 )
 
-# Now add the src/ subdirectory (where sources will be added to the target)
-add_subdirectory(src)
+# Register the module initialization
+target_compile_definitions(rl_eco
+  PRIVATE
+    ECO_HOME="${CMAKE_CURRENT_SOURCE_DIR}"
+)
+
+# Optional: for debugging
+message(STATUS "RL_ECO sources: ${CMAKE_CURRENT_SOURCE_DIR}")
+

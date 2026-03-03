@@ -91,6 +91,11 @@
 #include "utl/ScopedTemporaryFile.h"
 #include "utl/decode.h"
 
+//access to eco stuff
+#include "rl_eco/MakeRlEco.h"
+#include "rl_eco/RlEco.h"
+
+
 namespace ord {
 extern const char* ord_tcl_inits[];
 }  // namespace ord
@@ -100,7 +105,7 @@ extern "C" {
 extern int Ord_Init(Tcl_Interp* interp);
 }
 
-extern int rl_main();
+
 
 namespace ord {
 
@@ -191,8 +196,6 @@ void OpenRoad::init(Tcl_Interp* tcl_interp,
                     const bool batch_mode)
 {
   tcl_interp_ = tcl_interp;
-  printf("rl_main\n");
-  //  rl_main();
   // Make components.
   utl::Progress::setBatchMode(batch_mode);
   logger_ = new utl::Logger(log_filename, metrics_filename);
@@ -292,6 +295,10 @@ void OpenRoad::init(Tcl_Interp* tcl_interp,
   dft::initDft(tcl_interp);
   est::initTcl(tcl_interp);
 
+  printf("Initializing eco\n");
+  ord::initRlEco(this);
+  printf("Eco is initialized\n");
+  
   // Import exported commands to global namespace.
   Tcl_Eval(tcl_interp, "sta::define_sta_cmds");
   Tcl_Eval(tcl_interp, "namespace import sta::*");
@@ -303,6 +310,9 @@ void OpenRoad::init(Tcl_Interp* tcl_interp,
     // remove error from tcl result.
     Tcl_ResetResult(tcl_interp);
   }
+
+
+  
 }
 
 ////////////////////////////////////////////////////////////////

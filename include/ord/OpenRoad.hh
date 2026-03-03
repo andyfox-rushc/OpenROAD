@@ -128,6 +128,10 @@ namespace est {
 class EstimateParasitics;
 }
 
+namespace eco {
+  class RlEco;
+}
+
 namespace ord {
 
 class dbVerilogNetwork;
@@ -181,7 +185,10 @@ class OpenRoad
   {
     return estimate_parasitics_;
   }
+  eco::RlEco* getRlEco() {return rl_eco_;}
+  
 
+  
   // Return the bounding box of the db rows.
   odb::Rect getCore();
   // Return true if the command units have been initialized.
@@ -285,7 +292,8 @@ class OpenRoad
   dft::Dft* dft_ = nullptr;
   est::EstimateParasitics* estimate_parasitics_ = nullptr;
   utl::CallBackHandler* callback_handler_ = nullptr;
-
+  eco::RlEco* rl_eco_ = nullptr;
+  
   int threads_ = 1;
 
   static OpenRoad* app_;
