@@ -1,3 +1,5 @@
+#include "ord/OpenRoad.hh"
+#include "rl_eco/EcoTypes.h"
 #include "rl_eco/EcoQLearningTrainer.h"
 #include "rl_eco/EcoNeuralNetwork.h"
 #include "rl_eco/DQNAgent.h"
@@ -17,6 +19,31 @@
 
 namespace eco {
 
+  //constructor for inference mode
+  EcoQLearningTrainer::EcoQLearningTrainer(std::shared_ptr<EcoDesignManager> manager,
+					   const QLearningConfig& config,
+					   utl::Logger* logger,
+					   const char* filepath,
+					   size_t feature_size,
+					   size_t action_size)
+    : manager_(manager), 
+      config_(config),
+      total_steps_(0),
+      best_episode_reward_(-std::numeric_limits<double>::infinity()),
+      logger_(logger) {
+
+    rsz::Resizer* resizer = ord::OpenRoad::openRoad() -> getResizer();
+    env_ = std::make_unique<EcoRLEnvironment>(manager, resizer);
+    agent_ = std::make_unique<DQNAgent>(feature_size,action_size, config);
+    agent_ -> loadModel(filepath);
+    agent_ -> setInferenceMode(true);
+    printf("Making inference agent for state size %d and Action size %d\n",
+	   feature_size,
+	   action_size);
+  }
+
+
+  //constructor for learning mode
 EcoQLearningTrainer::EcoQLearningTrainer(std::shared_ptr<EcoDesignManager> manager,
 					 const QLearningConfig& config,
 					 utl::Logger* logger)
@@ -25,12 +52,25 @@ EcoQLearningTrainer::EcoQLearningTrainer(std::shared_ptr<EcoDesignManager> manag
       total_steps_(0),
       best_episode_reward_(-std::numeric_limits<double>::infinity()),
       logger_(logger) {
-    
-    env_ = std::make_unique<EcoRLEnvironment>(manager, manager->logger());
+
+  //Pass in resizer from openroad (note this should be cleaned up
+  //so that eco initializes its own copy).
+  rsz::Resizer* resizer = ord::OpenRoad::openRoad() -> getResizer();
+  
+  env_ = std::make_unique<EcoRLEnvironment>(manager, resizer);
     
     // Create agent
     size_t state_size = env_->getStateSize();
     size_t action_size = env_->getActionSize();
+    //Note that until we start training we don't have any actions
+    //so we default the action size
+    if (action_size == 0){
+      printf("Action size is zero ! defaulting to a maximum\n");
+      action_size = config.default_action_size;
+    }
+    printf("Making agent for state size %d and Action size %d\n",
+	   state_size,
+	   action_size);
     agent_ = std::make_unique<DQNAgent>(state_size, action_size, config);
 }
 
@@ -55,93 +95,227 @@ void EcoQLearningTrainer::train(size_t num_episodes) {
     }
 }
 
+  void EcoQLearningTrainer::applyInference(){
+  env_->reset();
+  auto state = env_ -> getCurrentState();
+  bool done = false;
+  int steps=0;
+  agent_ -> setInferenceMode(true);
+  
+  while (!done){
+        // Get current state as feature vector
+      auto state_features = state.toVector();
+      env_ -> state_size(state_features.size() > env_ -> state_size()?
+			 state_features.size():
+			 env_ -> state_size());
+      
+      // Get valid actions for this episode.
+      // Side effect is to construct means of indexing actions
+      // (populates environment action2index, index2action)
+      //
+      auto valid_actions_enum = env_->getValidActions(state);
+      printf("Number of valid actions %d\n", valid_actions_enum.size());
+
+      logger_->info(utl::ECO, 998, "Inference Moves {}:  TNS {} WNS {}",
+		    steps,
+		    state.tns,
+		    state.wns);
+
+      // Get Q-values for all actions (before selection)
+
+      printf("State features size =%d state_size = %d\n",
+	     state_features.size(),
+	     env_ -> getStateSize());
+      if (state_features.size() < env_ -> getStateSize()){
+	for (size_t s = state_features.size();
+	     s != env_ -> getStateSize();
+	     s++){
+	  state_features.push_back(0.0);
+	}
+      }
+      
+      auto q_values = agent_->getQValues(state_features);
+      
+      printf("Number of q values %d when action count is %d\n",
+	     q_values.size(),
+	     valid_actions_enum.size()
+	     );
+
+
+      if (q_values.size() == 0){
+	printf("Why no q values ???\n");
+	exit(0);
+      }
+      
+      //debug
+      logger_->info(utl::ECO, 999, "Q-values for valid actions:");
+      for (size_t i = 0; i < valid_actions_enum.size(); ++i) {
+	//action is std::shared_ptr<EcoAction>
+	const auto action = valid_actions_enum[i];
+	size_t idx = env_ -> getIndexFromAction(action);
+	if (idx < q_values.size()) {
+	  logger_->info(utl::ECO, 999, "  {} : Q = {:.10f}", 
+			action -> toString(),
+			q_values[idx]);
+	}
+      }
+      
+      std::vector<size_t> valid_actions;
+      for (const auto& action : valid_actions_enum) {
+	//action is std::shared_ptr<EcoAction>
+	valid_actions.push_back(env_ -> getIndexFromAction(action));
+      }
+      
+      if (valid_actions.empty()) {
+	break;
+      }
+        
+      // Select action
+      size_t action_index = agent_->selectAction(state_features, valid_actions, true);
+
+      if (action_index >= env_ -> getActionSize()){
+	std::cerr << "Warning: Invalid action index " << action_index << " >= " <<
+	  env_ -> getActionSize() << std::endl;
+	continue;
+      }
+      // Convert index back to action
+      std::shared_ptr<EcoAction> action = env_ -> getActionFromIndex(action_index);
+        
+      // Take action
+      EcoDesignManager::MoveResult result = env_ -> executeMove(action);      
+
+      auto next_state = env_ -> getCurrentState();
+      bool done = env_->isEpisodeDone();
+      if (done){
+	printf("inference is done\n");
+	break;
+      }
+      // Update state
+      state = next_state;
+      printf("Updated state\n");
+      steps++;
+      total_steps_++;
+    }
+  }
+  
+
+
+  
 void EcoQLearningTrainer::trainEpisode() {
-    auto state = env_->reset();
-    double episode_reward = 0.0;
-    size_t steps = 0;
-    std::vector<EcoMove> episode_moves;
+  env_->reset();
+  auto state = env_ -> getCurrentState();
+  double episode_reward = 0.0;
+  size_t steps = 0;
+  std::vector<std::shared_ptr<EcoAction> > episode_actions;
     
     while (steps < config_.max_steps_per_episode) {
         // Get current state as feature vector
-        auto state_features = state.toFeatureVectorEnhanced();
-        
-        // Get valid actions
-        auto valid_actions_enum = env_->getValidActions(state);
+      auto state_features = state.toVector();
 
-	logger_->info(utl::ECO, 998, "Step {}: State - {} changes left, {} spares, type: {}",
-                      steps, state.num_unimplemented_changes, 
-                      state.num_available_spare_cells,
-                      state.current_change_type);
-        // Get Q-values for all actions (before selection)
-        auto q_values = agent_->getQValues(state_features);
-        
-        // DEBUG: Log Q-values for valid actions
-        logger_->info(utl::ECO, 999, "Q-values for valid actions:");
-        for (size_t i = 0; i < valid_actions_enum.size(); ++i) {
-            const auto& action = valid_actions_enum[i];
-            size_t idx = action.toIndex();
-            if (idx < q_values.size()) {
-                logger_->info(utl::ECO, 999, "  {} : Q = {:.2f}", 
-                             action.toString(), q_values[idx]);
-            }
-        }
-        std::vector<size_t> valid_actions;
-        for (const auto& action : valid_actions_enum) {
-            valid_actions.push_back(action.toIndex());
-        }
-        
-        if (valid_actions.empty()) {
-            break;
-        }
-        
-        // Select action
-        size_t action_index = agent_->selectAction(state_features, valid_actions, true);
+      // Get valid actions for this episode.
+      // Side effect is to construct means of indexing actions
+      // (populates environment action2index, index2action)
+      //
+      auto valid_actions_enum = env_->getValidActions(state);
 
-	if (action_index >= env_ -> getActionSize()){
-	  std::cerr << "Warning: Invalid action index " << action_index << " >= " <<
-	    env_ -> getActionSize() << std::endl;
-	  continue;
+      printf("Number of valid actions %d\n", valid_actions_enum.size());
+
+      
+      logger_->info(utl::ECO, 998, "Step {}: Moves attempted {}: Moves accepted {} TNS {} WNS {}",
+		    steps,
+		    state.moves_attempted,
+		    state.moves_accepted,
+		    state.tns,
+		    state.wns);
+
+      // Get Q-values for all actions (before selection)
+
+      printf("State features size =%d state_size = %d\n",
+	     state_features.size(),
+	     env_ -> getStateSize());
+      if (state_features.size() < env_ -> getStateSize()){
+	for (size_t s = state_features.size();
+	     s != env_ -> getStateSize();
+	     s++){
+	  state_features.push_back(0.0);
 	}
+      }
+      
+      auto q_values = agent_->getQValues(state_features);
+      
+      printf("Number of q values %d when action count is %d\n",
+	     q_values.size(),
+	     valid_actions_enum.size()
+	     );
+
+
+      if (q_values.size() == 0){
+	printf("Why no q values ???\n");
+	exit(0);
+      }
+      
+      //debug
+      logger_->info(utl::ECO, 999, "Q-values for valid actions:");
+      for (size_t i = 0; i < valid_actions_enum.size(); ++i) {
+	//action is std::shared_ptr<EcoAction>
+	const auto action = valid_actions_enum[i];
+	size_t idx = env_ -> getIndexFromAction(action);
+	if (idx < q_values.size()) {
+	  logger_->info(utl::ECO, 999, "  {} : Q = {:.10f}", 
+			action -> toString(),
+			q_values[idx]);
+	}
+      }
+      
+      std::vector<size_t> valid_actions;
+      for (const auto& action : valid_actions_enum) {
+	//action is std::shared_ptr<EcoAction>
+	valid_actions.push_back(env_ -> getIndexFromAction(action));
+      }
+      
+      if (valid_actions.empty()) {
+	break;
+      }
+        
+      // Select action
+      size_t action_index = agent_->selectAction(state_features, valid_actions, true);
+
+      if (action_index >= env_ -> getActionSize()){
+	std::cerr << "Warning: Invalid action index " << action_index << " >= " <<
+	  env_ -> getActionSize() << std::endl;
+	continue;
+      }
 	
-        // Convert index back to action
-        EcoAction action = EcoAction::fromIndex(action_index);
+      // Convert index back to action
+      std::shared_ptr<EcoAction> action = env_ -> getActionFromIndex(action_index);
         
-        // Take action
-        auto [next_state, reward] = env_->step(action);
-        bool done = env_->isDone();
+      // Take action
+      double reward = env_->step(action);
+      auto next_state = env_ -> getCurrentState();
+      bool done = env_->isEpisodeDone();
+
+      //record the action
+      episode_actions.push_back(action);
+      // Get next state features
+      auto next_state_features = next_state.toVector();
         
-        // Get next state features
-        auto next_state_features = next_state.toFeatureVectorEnhanced();
+      // Store experience
+      Experience exp{state_features, action_index, reward, next_state_features, done};
+      agent_->remember(exp);
         
-        // Store experience
-        Experience exp{state_features, action_index, reward, next_state_features, done};
-        agent_->remember(exp);
-        
-        // Train agent
-        if (total_steps_ % config_.update_frequency == 0) {
-            agent_->train();
-        }
+      // Train agent
+      if (total_steps_ % config_.update_frequency == 0) {
+	agent_->train();
+      }
         
         // Update state
         state = next_state;
         episode_reward += reward;
         steps++;
         total_steps_++;
-        
-        // Record move
-        auto possible_moves = manager_->generatePossibleMoves();
-        if (!possible_moves.empty()) {
-            // Find corresponding move
-            for (const auto& move : possible_moves) {
-                // Match action to move (simplified - would need proper mapping)
-                if ((action.type == EcoAction::USE_SPARE_CELL && move.type == EcoMove::USE_SPARE_CELL) ||
-                    (action.type == EcoAction::SKIP_CHANGE && move.type == EcoMove::SKIP)) {
-                    episode_moves.push_back(move);
-                    break;
-                }
-            }
-        }
-        
+
+
+	
         if (done) {
             break;
         }
@@ -153,7 +327,7 @@ void EcoQLearningTrainer::trainEpisode() {
     // Update best episode
     if (episode_reward > best_episode_reward_) {
         best_episode_reward_ = episode_reward;
-        best_move_sequence_ = episode_moves;
+        best_action_sequence_ = episode_actions;
     }
 }
 
@@ -161,16 +335,17 @@ double EcoQLearningTrainer::evaluate(size_t num_episodes) {
     double total_reward = 0.0;
     
     for (size_t episode = 0; episode < num_episodes; ++episode) {
-        auto state = env_->reset();
+      env_->reset();
+      auto state = env_ -> getCurrentState();
         double episode_reward = 0.0;
         size_t steps = 0;
         
         while (steps < config_.max_steps_per_episode) {
-            auto state_features = state.toFeatureVectorEnhanced();
+	  auto state_features = state.toVector();
             auto valid_actions_enum = env_->getValidActions(state);
             std::vector<size_t> valid_actions;
             for (const auto& action : valid_actions_enum) {
-                valid_actions.push_back(action.toIndex());
+	      valid_actions.push_back(env_ -> getIndexFromAction(action));
             }
             
             if (valid_actions.empty()) {
@@ -179,15 +354,14 @@ double EcoQLearningTrainer::evaluate(size_t num_episodes) {
             
             // Select action without exploration
             size_t action_index = agent_->selectAction(state_features, valid_actions, false);
-            EcoAction action = EcoAction::fromIndex(action_index);
+	    std::shared_ptr<EcoAction> action = env_ -> getActionFromIndex(action_index);
             
-            auto [next_state, reward] = env_->step(action);
-            
-            state = next_state;
+	    double reward = env_->step(action);
+            auto state = env_ -> getCurrentState();
             episode_reward += reward;
             steps++;
             
-            if (env_->isDone()) {
+            if (env_->isEpisodeDone()) {
                 break;
             }
         }
@@ -198,8 +372,8 @@ double EcoQLearningTrainer::evaluate(size_t num_episodes) {
     return total_reward / num_episodes;
 }
 
-std::vector<EcoMove> EcoQLearningTrainer::getBestMoveSequence() {
-    return best_move_sequence_;
+  std::vector<std::shared_ptr<EcoAction> > EcoQLearningTrainer::getBestActionSequence() {
+    return best_action_sequence_;
 }
 
 void EcoQLearningTrainer::printTrainingProgress(size_t episode) {
@@ -268,9 +442,9 @@ std::string EcoQLearningTrainer::generateTrainingReport() const {
         report << "  Average Episode Reward: " << avg_reward << "\n";
     }
     
-    report << "\nBest Move Sequence (" << best_move_sequence_.size() << " moves):\n";
-    for (size_t i = 0; i < best_move_sequence_.size(); ++i) {
-        report << "  " << i + 1 << ". " << best_move_sequence_[i].getDescription() << "\n";
+    report << "\nBest Action Sequence (" << best_action_sequence_.size() << " actions):\n";
+    for (size_t i = 0; i < best_action_sequence_.size(); ++i) {
+      report << "  " << i + 1 << ". " << best_action_sequence_[i]->toString() << "\n";
     }
     
     return report.str();
@@ -323,33 +497,22 @@ std::vector<double> movingAverage(const std::vector<double>& data, size_t window
 }
 
 std::unordered_map<std::string, size_t> analyzeActionDistribution(
-    const std::vector<EcoMove>& moves) {
-    
+								  const std::vector<std::shared_ptr<EcoAction> > & actions) {
     std::unordered_map<std::string, size_t> distribution;
     
-    for (const auto& move : moves) {
-        std::string move_type;
-        switch (move.type) {
-            case EcoMove::MoveType::USE_SPARE_CELL:
-                move_type = "USE_SPARE_CELL";
-                break;
-            case EcoMove::MoveType::CONNECT_NET:
-                move_type = "CONNECT_NET";
-                break;
-            case EcoMove::MoveType::DISCONNECT_NET:
-                move_type = "DISCONNECT_NET";
-                break;
-            case EcoMove::MoveType::CREATE_NET:
-                move_type = "CREATE_NET";
-                break;
-            case EcoMove::MoveType::BUFFER_NET:
-                move_type = "BUFFER_NET";
-                break;
-            case EcoMove::MoveType::SKIP:
-                move_type = "SKIP";
-                break;
+    for (const auto& action : actions) {
+        std::string action_type;
+        switch (action -> type) {
+	case EcoAction::ActionType::RESIZE:
+	  action_type = "RESIZE";
+	  break;
+	case EcoAction::ActionType::REBUFFER:
+	  action_type = "REBUFFER";
+	  break;
+	default:
+	  break;
         }
-        distribution[move_type]++;
+        distribution[action_type]++;
     }
     
     return distribution;

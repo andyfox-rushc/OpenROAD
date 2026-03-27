@@ -18,6 +18,11 @@ static eco::RlEco* rl_eco = nullptr;
   if (!rl_eco) {
     rl_eco = new eco::RlEco();
   }
+  if (!rl_eco -> successfullyInit()){
+    ord::OpenRoad* openroad = ord::OpenRoad::openRoad();
+    rl_eco -> init(openroad);
+  }
+  
   return rl_eco;
 }
 

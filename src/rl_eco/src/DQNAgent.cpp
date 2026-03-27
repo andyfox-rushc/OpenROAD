@@ -1,3 +1,5 @@
+
+#include "rl_eco/EcoTypes.h"
 #include "rl_eco/DQNAgent.h"
 #include "rl_eco/EcoNeuralNetwork.h"
 #include "rl_eco/EcoRLEnvironment.h"
@@ -27,6 +29,7 @@ DQNAgent::DQNAgent(size_t state_size, size_t action_size, const QLearningConfig&
     for (size_t hidden_size : config.hidden_layers) {
         layer_sizes.push_back(hidden_size);
     }
+    printf("Building last layer of size %d\n",action_size);
     layer_sizes.push_back(action_size);
     
     // Create Q-network and target network
@@ -59,10 +62,8 @@ DQNAgent::DQNAgent(size_t state_size, size_t action_size, const QLearningConfig&
                 best_action = action;
             }
         }
-        
         return best_action;
     }
-    
     // Exploration: random valid action
     return valid_actions[std::rand() % valid_actions.size()];
 }
@@ -71,10 +72,12 @@ DQNAgent::DQNAgent(size_t state_size, size_t action_size, const QLearningConfig&
 void DQNAgent::remember(const Experience& exp) {
 
   if (inference_mode_i)
-    return; //skip memory stoarget in inference mode
+    return; //skip memory storage in inference mode
   replay_buffer_->add(exp);
 }
 
+
+  
 double DQNAgent::train() {
     if (!replay_buffer_->canSample(config_.batch_size)) {
         return 0.0;

@@ -1,1155 +1,1239 @@
-#include "odb/db.h"
+/*
+The ECO Design Manager
+----------------------
+
+Performs ECO moves. Where possible using the resizer infra structure.
+The resizer offers journalling for easy do/undo and also buffer
+insertion, resizing and other moves.
+
+*/
+#include "rl_eco/EcoTypes.h" //for path info
 #include "rl_eco/EcoDesignManager.h"
-#include "rl_eco/EcoChangeSet.h"
 
+#include "odb/db.h"
+#include "odb/dbTypes.h"
 
-#include "db_sta/dbSta.hh"
+#include "sta/Sta.hh"
+#include "sta/Network.hh"
+#include "sta/Liberty.hh"
+#include "sta/MinMax.hh"
+#include "sta/PathEnd.hh"
+#include "sta/PathExpanded.hh"
+#include "sta/Graph.hh"
+#include "sta/Sdc.hh"
+#include "sta/Units.hh"
+
+#include "grt/GlobalRouter.h"
+#include "rsz/Resizer.hh"
+
 #include "utl/Logger.h"
-#include "odb/defout.h"
+
 
 #include <algorithm>
 #include <cmath>
-#include <fstream>
+#include <iostream>
 #include <sstream>
 
+using namespace odb;
+using namespace sta;
+using namespace grt;
+
 namespace eco {
-
-// EcoChange implementations
-std::string EcoGateChange::getDescription() const {
-    return "Gate change: " + instance_change_->toString();
-}
-
-std::string EcoNetChange::getDescription() const {
-    return "Net change: " + connection_change_->toString();
-}
-
-std::string EcoTimingFixChange::getDescription() const {
-    std::stringstream ss;
-    ss << "Timing fix for path with slack: " << slack_ << "ns";
-    return ss.str();
-}
-
-// EcoMove implementation
-std::string EcoMove::getDescription() const {
-    switch (type) {
-        case USE_SPARE_CELL:
-            return "Use spare cell " + spare_cell_name + " for " + instance_name;
-        case CONNECT_NET:
-            return "Connect " + instance_name + "." + pin_name + " to net " + net_name;
-        case DISCONNECT_NET:
-            return "Disconnect " + instance_name + "." + pin_name + " from net";
-        case CREATE_NET:
-            return "Create net " + net_name;
-        case BUFFER_NET:
-            return "Insert buffer of size " + std::to_string(buffer_size) + " on net " + net_name;
-        case SKIP:
-            return "Skip current change";
-        default:
-            return "Unknown move";
-    }
-}
-
-// EcoDesignManager implementation
-  EcoDesignManager::EcoDesignManager(odb::dbDatabase* db, 
-				     sta::dbSta* sta,
-				     utl::Logger* logger)
-    : db_(db),  sta_(sta), logger_(logger),
-      total_changes_(0), implemented_changes_(0),
-      cached_worst_slack_(0.0), cached_total_wirelength_(0.0), 
-      cached_congestion_metric_(0.0), metrics_valid_(false) {
+EcoDesignManager::EcoDesignManager(dbDatabase* db,
+				   Sta* sta, 
+				   GlobalRouter* router,
+				   rsz::Resizer* resizer,
+				   utl::Logger* logger)
+  : db_(db), sta_(sta), router_(router), resizer_(resizer), logger_(logger){
     
-    chip_ = db_->getChip();
-    if (chip_) {
-        block_ = chip_->getBlock();
-    }
-    initializeSpareCellPatterns();
-}
-
-void EcoDesignManager::setChangeSet(std::shared_ptr<EcoChangeSet> change_set) {
-    change_set_ = change_set;
-    total_changes_ = change_set_->getTotalChanges();
-    convertChangesToEcoChanges();
-}
-
-bool EcoDesignManager::parseChangeFile(const char* filename) {
-    if (!change_set_) {
-        change_set_ = std::make_shared<EcoChangeSet>();
+    if (!db_ || !sta_ || !resizer_) {
+        throw std::runtime_error("Database, STA, and Resizer objects must not be null");
     }
     
-    bool success = change_set_->parseChangeFile(filename);
-    if (success) {
-        total_changes_ = change_set_->getTotalChanges();
-        convertChangesToEcoChanges();
+    block_ = db_->getChip()->getBlock();
+    if (!block_) {
+        throw std::runtime_error("No block found in database");
     }
-    return success;
+    dbsta_= dynamic_cast<dbSta*>(sta);
+    if (!dbsta_){
+      throw std::runtime_error("No dbsta found in sta");
+    }
+    // Initialize spare cell inventory
+    identifySpareCells();
+
+    //needed for estimation
+    resizer -> getEstimateParasitics() -> setIncrementalParasiticsEnabled(true);
 }
 
-  
-// Add these methods to EcoDesignManager.cpp:
-
-float EcoDesignManager::getTimingImprovement() const {
-    // Calculate timing improvement compared to baseline
-    // This should compare current worst slack to initial worst slack
-    static double initial_worst_slack = std::numeric_limits<double>::lowest();
-    if (initial_worst_slack == std::numeric_limits<double>::lowest()) {
-        // First call - store initial value
-        initial_worst_slack = getWorstSlack();
-        return 0.0f;
-    }
-    
-    double current_slack = getWorstSlack();
-    return static_cast<float>((current_slack - initial_worst_slack) * 1000.0); // Convert to ps
+EcoDesignManager::~EcoDesignManager() {
 }
 
-float EcoDesignManager::getWirelengthIncrease() const {
-    // Calculate wirelength increase as percentage
-    static double initial_wirelength = 0.0;
-    if (initial_wirelength == 0.0) {
-        initial_wirelength = getTotalWirelength();
-        return 0.0f;
-    }
-    
-    double current_wl = getTotalWirelength();
-    return static_cast<float>((current_wl - initial_wirelength) / initial_wirelength);
-}
 
-void EcoDesignManager::applyGreedyPlacement() {
-    logger_->info(utl::ECO, 107, "Applying greedy ECO placement");
-    
-    // Reset to start fresh
-    reset();
-    
-    // Process all changes greedily
-    while (hasUnimplementedChanges()) {
-        auto* change = getNextUnimplementedChange();
-        if (!change) break;
-        
-        // Greedy strategy: use nearest spare cell
-        auto gate_change = dynamic_cast<EcoGateChange*>(change);
-        if (gate_change) {
-            auto inst_change = gate_change->getInstanceChange();
-            if (inst_change && inst_change->getInfo().has_location) {
-                double x = inst_change->getInfo().x_coord;
-                double y = inst_change->getInfo().y_coord;
-                
-                // Find nearest available spare cell of correct type
-                std::string required_type = inst_change->getInfo().cell_type;
-                auto* spare = findNearestSpareCell(required_type, x, y);
-                
-                if (spare) {
-                    implementChangeWithSpareCell(change, *spare);
-                } else {
-                    // No suitable spare cell - skip
-                    skipChange(change);
-                }
-            } else {
-                // No location info - skip this change
-                skipChange(change);
-            }
-        } else {
-            // Handle other change types
-            auto net_change = dynamic_cast<EcoNetChange*>(change);
-            if (net_change) {
-                // For net changes, just mark as implemented (simplified)
-                implementChangeWithReroute(change);
-            } else {
-                // For any other change type (like timing fixes), skip
-                skipChange(change);
-            }
-        }
-    }
-}
-  
-bool EcoDesignManager::applyMove(const EcoMove& move) {
-    auto* current = getCurrentChange();
-    if (!current) {
-        logger_->warn(utl::ECO, 108, "Trying to apply move with no current change");  // Fixed: added missing quote
-        return false;
-    }
-    
-    switch (move.type) {
-        case EcoMove::USE_SPARE_CELL:
-        {
-            // Find the spare cell
-            for (auto& cell : spare_cells_) {
-                if (cell.name == move.spare_cell_name && !cell.used) {
-                    return implementChangeWithSpareCell(current, cell);
-                }
-            }
-            return false;
-        }
-        
-        case EcoMove::CONNECT_NET:
-            return implementChangeWithReroute(current);
-            
-        case EcoMove::DISCONNECT_NET:
-            // Handle disconnect
-            skipChange(current);  // Simplified for now
-            return true;
-            
-        case EcoMove::CREATE_NET:
-            createNet(move.net_name);
-            return true;
-            
-        case EcoMove::BUFFER_NET:
-            return insertBuffer(current, move.buffer_size);
-            
-        case EcoMove::SKIP:
-            skipChange(current);
-            return true;
-            
-        default:
-            return false;
-    }
-}
-
-  
-
-
-void EcoDesignManager::initializeSpareCellPatterns() {
-    // Common spare cell naming patterns
-    spare_cell_patterns_ = {
-        "SPARE", "spare", "FILL", "fill", "DCAP", "dcap",
-        "TIE", "tie", "ANTENNA", "antenna"
-    };
-}
-
-  std::string EcoDesignManager::extractBaseType(const std::string& full_type) const{
-    // First, try to remove any known spare cell pattern prefix
-        for (const auto& pattern : spare_cell_patterns_) {
-            // Check if type starts with pattern followed by underscore
-            std::string prefix = pattern + "_";
-            if (full_type.find(prefix) == 0) {
-                return full_type.substr(prefix.length());
-            }
-            
-            // Check if type starts with pattern (case insensitive)
-            std::string lower_type = full_type;
-            std::transform(lower_type.begin(), lower_type.end(), lower_type.begin(), ::tolower);
-            std::string lower_pattern = pattern;
-            std::transform(lower_pattern.begin(), lower_pattern.end(), lower_pattern.begin(), ::tolower);
-            
-            if (lower_type.find(lower_pattern + "_") == 0) {
-                return full_type.substr(lower_pattern.length() + 1);
-            }
-        }
-        
-        // If no pattern matched, try to extract meaningful type
-        // Look for common cell type indicators
-        static const std::vector<std::string> type_indicators = {
-            "NAND", "NOR", "AND", "OR", "XOR", "XNOR", 
-            "INV", "BUF", "MUX", "AOI", "OAI", "DFF", 
-            "LATCH", "SDFF", "DFFSR"
-        };
-        
-        for (const auto& indicator : type_indicators) {
-            if (full_type.find(indicator) != std::string::npos) {
-                // Found a known cell type indicator
-                // Extract the part containing this indicator
-                size_t pos = full_type.find(indicator);
-                size_t end = pos + indicator.length();
-                
-                // Check if there's a drive strength suffix (e.g., _X1, _X2)
-                if (end < full_type.length() && full_type[end] == '_') {
-                    size_t strength_end = full_type.find_first_not_of("X0123456789", end + 1);
-                    if (strength_end != std::string::npos) {
-                        return full_type.substr(pos, strength_end - pos);
-                    } else {
-                        return full_type.substr(pos);
-                    }
-                }
-                
-                return full_type.substr(pos, indicator.length());
-            }
-        }
-        
-        // If still no match, return the full type minus any common prefixes
-        return full_type;
+  std::vector<std::shared_ptr<SpareCell> > EcoDesignManager::getSpareCells(){
+    return spare_cells_;
   }
 
-  
 
-std::string EcoDesignManager::extractCellSignature(const std::string& full_type) const {
-    // Remove spare prefixes
-    std::string type = full_type;
-    for (const auto& pattern : spare_cell_patterns_) {
-        std::string prefix = pattern + "_";
-        if (type.find(prefix) == 0) {
-            type = type.substr(prefix.length());
-        }
-    }
-    
-    // Now return the full logic type INCLUDING size
-    // Examples: "NAND2_X1" -> "NAND2", "SPARE_INV_X2" -> "INV"
-    
-    // Remove only the drive strength
-    size_t pos = type.rfind("_X");
-    if (pos != std::string::npos && pos + 2 < type.length()) {
-        if (std::isdigit(type[pos + 2])) {
-            return type.substr(0, pos);
-        }
-    }
-    
-    return type;
-}
-
-bool EcoDesignManager::areCellsCompatible(const std::string& spare_type, 
-                                          const std::string& required_type) const {
-    std::string spare_sig = extractCellSignature(spare_type);
-    std::string required_sig = extractCellSignature(required_type);
-    
-    // NAND2 == NAND2 (regardless of drive strength)
-    // NAND2 != NAND3
-    return spare_sig == required_sig;
-}
-
-  
-  std::vector<SpareCell*> EcoDesignManager::findSpareCellsByType(const std::string& base_type){
-    std::vector<SpareCell*> matching_cells;
-    for (auto& cell : spare_cells_) {
-      if (!cell.used) {
-	std::string cell_base_type = extractBaseType(cell.type);
-	if (cell_base_type == base_type) {
-	  matching_cells.push_back(&cell);
-	}
-      }
-    }
-        
-        // Sort by some criteria (e.g., alphabetical by name)
-        std::sort(matching_cells.begin(), matching_cells.end(),
-                  [](const SpareCell* a, const SpareCell* b) {
-                      return a->name < b->name;
-                  });
-        return matching_cells;
+  dbInst* EcoDesignManager::findInst(std::string& inst_name){
+    return (block_ -> findInst(inst_name.c_str()));
   }
-
   
 void EcoDesignManager::identifySpareCells() {
     spare_cells_.clear();
+    spare_cells_by_type_.clear();
     
-    if (!block_) {
-        logger_->warn(utl::ECO, 100, "No block loaded, cannot identify spare cells");
-        return;
-    }
-    
-    for (odb::dbInst* inst : block_->getInsts()) {
+    // Scan all instances for spare cells
+    for (dbInst* inst : block_->getInsts()) {
         if (isSpareCell(inst)) {
-            odb::dbBox* bbox = inst->getBBox();
-            double x = (bbox->xMin() + bbox->xMax()) / 2.0 / static_cast<double>(block_->getDbUnitsPerMicron());
-            double y = (bbox->yMin() + bbox->yMax()) / 2.0 / static_cast<double>(block_->getDbUnitsPerMicron());
+	  std::shared_ptr<SpareCell> spare = std::make_shared<SpareCell>();
+            spare -> instance = inst;
+            spare -> master = inst->getMaster();
             
-            SpareCell cell(inst->getName(), 
-                          inst->getMaster()->getName(),
-                          x, y, inst);
-            spare_cells_.push_back(cell);
-        }
-    }
-    
-    logger_->info(utl::ECO, 101, "Identified {} spare cells", spare_cells_.size());
-}
-
-
-bool EcoDesignManager::isSpareCell(odb::dbInst* inst) const {
-    std::string inst_name = inst->getName();
-    std::string master_name = inst->getMaster()->getName();
-    
-    // Convert to lowercase for case-insensitive matching
-    std::string inst_name_lower = inst_name;
-    std::string master_name_lower = master_name;
-    std::transform(inst_name_lower.begin(), inst_name_lower.end(), inst_name_lower.begin(), ::tolower);
-    std::transform(master_name_lower.begin(), master_name_lower.end(), master_name_lower.begin(), ::tolower);
-    
-    // Check instance name against patterns
-    for (const auto& pattern : spare_cell_patterns_) {
-        std::string pattern_lower = pattern;
-        std::transform(pattern_lower.begin(), pattern_lower.end(), pattern_lower.begin(), ::tolower);
-        
-        // Check if pattern appears in the name
-        if (inst_name_lower.find(pattern_lower) != std::string::npos ||
-            master_name_lower.find(pattern_lower) != std::string::npos) {
-            return true;
-        }
-    }
-    
-    // Check if it's a standard cell that's unconnected
-    odb::dbMaster* master = inst->getMaster();
-    if (master && master->getType() == odb::dbMasterType::CORE) {
-        // Check if ALL pins are unconnected
-        bool all_unconnected = true;
-        for (odb::dbITerm* iterm : inst->getITerms()) {
-            if (iterm->getNet() != nullptr) {
-                // Check if it's only connected to power/ground
-                odb::dbNet* net = iterm->getNet();
-                if (!net->getSigType().isSupply()) {
-                    all_unconnected = false;
+            // Get location
+            int x, y;
+            inst->getLocation(x, y);
+            spare -> x = x;
+            spare -> y = y;
+            
+            // Check if it's already connected (used)
+            spare -> is_used = false;
+            for (dbITerm* iterm : inst->getITerms()) {
+                if (iterm->getNet() != nullptr) {
+		  if (!(iterm -> getNet() -> isSpecial())){
+                    spare -> is_used = true;
                     break;
+		  }
                 }
             }
-        }
-        
-        if (all_unconnected) {
-            // Additional check: verify it's a logic cell (not clock buffer, etc.)
-            return isLogicCell(master_name);
+            
+            // Determine type based on master cell name
+            spare -> type = getSpareType(spare -> master);
+            
+            if (!spare -> is_used) {
+                spare_cells_.push_back(spare);
+                spare_cells_by_type_[spare-> type].push_back(spare_cells_.back());
+            }
         }
     }
     
-    return false;
+    std::cout << "Identified " << spare_cells_.size() << " available spare cells" << std::endl;
+    // Print summary by type
+    for (const auto& [type, cells] : spare_cells_by_type_) {
+        std::cout << "  Type " << type << ": " << cells.size() << " cells" << std::endl;
+    }
 }
 
-  //
-  //TODO:
-  //get this from liberty !
-  //
-// Add helper method to check if a cell is a logic cell
-bool EcoDesignManager::isLogicCell(const std::string& cell_name) const {
-    static const std::vector<std::string> logic_patterns = {
-        "NAND", "NOR", "AND", "OR", "XOR", "XNOR", "INV", "BUF", 
-        "MUX", "AOI", "OAI", "DFF", "LATCH"
-    };
+  
+
+  
+bool EcoDesignManager::isSpareCell(dbInst* inst) const {
+    std::string inst_name = inst->getName();
+    // Common patterns: SPARE_*, FILL_*, spare_*, eco_*
+    return (inst_name.find("SPARE_") == 0 || 
+            inst_name.find("FILL_") == 0 ||
+            inst_name.find("spare_") == 0 ||
+            inst_name.find("testspare_") == 0 ||	    
+            inst_name.find("eco_") == 0);
+}
+
+  
+std::vector<std::string> EcoDesignManager::getCompatibleMasters(
+    const std::string& master_name) const {
     
-    std::string upper_name = cell_name;
-    std::transform(upper_name.begin(), upper_name.end(), upper_name.begin(), ::toupper);
+    std::vector<std::string> compatible_masters;
     
-    for (const auto& pattern : logic_patterns) {
-        if (upper_name.find(pattern) != std::string::npos) {
-            return true;
+    // Extract the base cell type (remove drive strength suffix)
+    std::string base_name = extractBaseName(master_name);
+    
+    // Get all masters in the library
+    
+    std::vector<dbMaster*> masters;
+    block_ -> getMasters(masters);
+    for (dbMaster* master : masters){
+        std::string candidate_name = master->getName();
+        
+        // Skip if same as current
+        if (candidate_name == master_name) {
+            continue;
+        }
+        
+        // Check if same base type
+        if (extractBaseName(candidate_name) == base_name) {
+            // Verify same number of pins and pin compatibility
+            if (arePinCompatible(master_name, candidate_name)) {
+                compatible_masters.push_back(candidate_name);
+            }
         }
     }
     
+    return compatible_masters;
+}
+
+std::string EcoDesignManager::extractBaseName(const std::string& master_name) const {
+    // Remove drive strength suffix (e.g., _X1, _X2, _X4, etc.)
+    size_t pos = master_name.rfind("_X");
+    if (pos != std::string::npos) {
+        return master_name.substr(0, pos);
+    }
+    return master_name;
+}
+
+bool EcoDesignManager::arePinCompatible(const std::string& master1_name, 
+                                        const std::string& master2_name) const {
+
+  dbMaster* master1 = db_->findMaster(master1_name.c_str());
+  dbMaster* master2 = db_->findMaster(master2_name.c_str());
+    
+  if (!master1 || !master2) {
     return false;
-}
-  
-  std::vector<std::shared_ptr<EcoChange>> EcoDesignManager::getImplementedChanges() const {
-    std::vector<std::shared_ptr<EcoChange>> implemented;
-    for (const auto& change : all_changes_) {
-        if (change->isImplemented()) {
-            implemented.push_back(change);
-        }
-    }
-    return implemented;
   }
-  
-std::set<std::string> EcoDesignManager::getAvailableSpareCellTypes() const {
-  std::set<std::string> cell_types;
-  for (const auto& spare_cell : spare_cells_) {
-    // Extract base type (remove any SPARE_ prefix if present)
-    std::string base_type = extractBaseType(spare_cell.type);
-    if (!base_type.empty()) {
-      cell_types.insert(base_type);
-    }
-  }
-  return cell_types;
-}
     
-  // Get spare cell type distribution
-  std::map<std::string, int> EcoDesignManager::getSpareCellTypeCount() const {
-    std::map<std::string, int> type_count;
-    for (const auto& spare_cell : spare_cells_) {
-      if (!spare_cell.used) {  // Only count available cells
-	std::string base_type = extractBaseType(spare_cell.type);
-	if (!base_type.empty()) {
-	  type_count[base_type]++;
-	}
-      }
-    }
-    return type_count;
+    // Check same number of pins
+  if (master1->getMTermCount() != master2->getMTermCount()) {
+    return false;
   }
+    
+    // Check pin names and directions match
+    std::map<std::string, dbSigType> pins1, pins2;
+    
+    for (dbMTerm* mterm : master1->getMTerms()) {
+        pins1[mterm->getName()] = mterm->getSigType();
+    }
+    
+    for (dbMTerm* mterm : master2->getMTerms()) {
+        pins2[mterm->getName()] = mterm->getSigType();
+    }
+    
+    return pins1 == pins2;
+}
+
   
-std::vector<SpareCell> EcoDesignManager::getAvailableSpareCells() const {
-    std::vector<SpareCell> available;
-    for (const auto& cell : spare_cells_) {
-        if (!cell.used) {
-            available.push_back(cell);
+
+  /*
+    TODO fix this hardcoded stuff
+  */
+std::string EcoDesignManager::getSpareType(dbMaster* master) const {
+    std::string master_name = master->getName();
+
+    // Convert to uppercase for comparison
+    std::transform(master_name.begin(), master_name.end(), master_name.begin(), ::toupper);
+    if (master_name.find("BUF") != std::string::npos) {
+        return "BUF";
+    } else if (master_name.find("INV") != std::string::npos) {
+        return "INV";
+    } else if (master_name.find("AND") != std::string::npos) {
+        return "AND";
+    } else if (master_name.find("OR") != std::string::npos) {
+        return "OR";
+    } else if (master_name.find("NAND") != std::string::npos) {
+        return "NAND";
+    } else if (master_name.find("NOR") != std::string::npos) {
+        return "NOR";
+    } else if (master_name.find("XOR") != std::string::npos) {
+        return "XOR";
+    } else if (master_name.find("MUX") != std::string::npos) {
+        return "MUX";
+    } else {
+        return "GENERIC";
+    }
+}
+
+  std::vector<std::shared_ptr<SpareCell> > EcoDesignManager::getAvailableSpares(
+    const std::string& type) const {
+    std::vector<std::shared_ptr<SpareCell> > available;
+    
+    for (const auto& spare : spare_cells_) {
+        if (!spare -> is_used && (type.empty() || spare->type == type)) {
+            available.push_back(spare);
         }
     }
+    
     return available;
 }
 
-int EcoDesignManager::getNumAvailableSpareCells() const {
-    int count = 0;
-    for (const auto& cell : spare_cells_) {
-        if (!cell.used) count++;
-    }
-    return count;
-}
+  
+SpareGateSummary EcoDesignManager::getSpareGateSummary() const {
+    SpareGateSummary summary;
+    
+    summary.total_count = 0;
+    summary.used_count = 0;
+    
+    summary.buffers = 0;
+    summary.inverters = 0;
+    summary.logic_gates = 0;
+    summary.sequentials = 0;
 
-void EcoDesignManager::reset() {
-    // Reset spare cells
-    for (auto& cell : spare_cells_) {
-        cell.used = false;
-    }
-    
-    // Reset changes
-    implemented_changes_ = 0;
-    unimplemented_changes_ = std::queue<std::shared_ptr<EcoChange>>();
-    for (auto& change : all_changes_) {
-        change->setImplemented(false);
-        unimplemented_changes_.push(change);
-    }
-    
-    current_change_ = nullptr;
-    invalidateMetrics();
-}
+    // Count available (unused) spare cells by type
+    for (const auto& spare : spare_cells_) {
+      if (spare->is_used){
+	summary.used_count++;
+      }
+      summary.total_count++;       
 
-bool EcoDesignManager::hasUnimplementedChanges() const {
-    return !unimplemented_changes_.empty();
-}
-
-bool EcoDesignManager::allChangesProcessed() const {
-    return implemented_changes_ == total_changes_;
-}
-
-int EcoDesignManager::getNumUnimplementedChanges() const {
-    return unimplemented_changes_.size();
-}
-
-EcoChange* EcoDesignManager::getCurrentChange() {
-    if (!current_change_ && !unimplemented_changes_.empty()) {
-        current_change_ = unimplemented_changes_.front();
+      sta::LibertyCell* lib_cell = dbsta_ -> getDbNetwork() -> findLibertyCell(spare->master -> getName().c_str());
+      assert(lib_cell);
+      if (isBuffer(lib_cell)){
+	summary.buffers++;
+      } else if (isInverter(lib_cell)){
+	summary.inverters++;
+      }
+      else if (isSequential(lib_cell)){
+	summary.sequentials++;
+      }
+      else if (spare->type == "AND" || 
+	       spare->type == "OR" || 
+	       spare->type == "NAND" || 
+	       spare->type == "NOR" || 
+	       spare->type == "XOR" || 
+	       spare->type == "MUX") {
+	summary.logic_gates++;
+      }
     }
-    return current_change_.get();
-}
-
-EcoChange* EcoDesignManager::getNextUnimplementedChange() {
-    if (!unimplemented_changes_.empty()) {
-        current_change_ = unimplemented_changes_.front();
-        unimplemented_changes_.pop();
-        return current_change_.get();
-    }
-    return nullptr;
-}
-
-bool EcoDesignManager::implementChange(Change* change) {
-    // This is a simplified implementation
-    // Real implementation would depend on change type
-    
-    auto inst_change = dynamic_cast<InstanceChange*>(change);
-    if (inst_change && inst_change->getType() == ChangeType::INSTANCE_ADDED) {
-        const auto& info = inst_change->getInfo();
-        auto* spare = findNearestSpareCell(info.cell_type, info.x_coord, info.y_coord);
-        if (spare) {
-            spare->used = true;
-            implemented_changes_++;
-            invalidateMetrics();
-            return true;
-        }
-    }
-    
-    auto conn_change = dynamic_cast<ConnectionChange*>(change);
-    if (conn_change) {
-        // Handle connection changes
-        implemented_changes_++;
-        invalidateMetrics();
-        return true;
-    }
-    
-    return false;
-}
-
-bool EcoDesignManager::implementChangeWithSpareCell(EcoChange* change, SpareCell& spare_cell) {
-  auto gate_change = dynamic_cast<EcoGateChange*>(change);
-    if (!gate_change) return false;
-    
-    auto inst_change = gate_change->getInstanceChange();
-    if (!inst_change || inst_change->getType() != ChangeType::INSTANCE_ADDED) {
-        return false;
-    }
-    
-    const auto& info = inst_change->getInfo();
-    
-    // 1. Rename spare instance to new instance name
-    spare_cell.db_inst->rename(info.name.c_str());
-    
-    // 2. Disconnect all non-power pins from dummy nets
-    for (odb::dbITerm* iterm : spare_cell.db_inst->getITerms()) {
-        odb::dbNet* net = iterm->getNet();
-        if (net && !net->getSigType().isSupply()) {
-            iterm->disconnect();
-            logger_->info(utl::ECO, 301, "Disconnected pin {} from net {}", 
-                         iterm->getMTerm()->getName(), net->getName());
-        }
-    }
-    
-    // 3. Apply connection changes for this instance
-    applyConnectionChanges(info.name);
-    
-    // 4. Mark as used and implemented
-    spare_cell.used = true;
-    change->setImplemented(true);
-    implemented_changes_++;
-    
-    logger_->info(utl::ECO, 302, "Repurposed spare cell {} as {}", 
-                 spare_cell.name, info.name);
-    
-    invalidateMetrics();
-    return true;
-}
-
-  // New method to apply connection changes
-void EcoDesignManager::applyConnectionChanges(const std::string& instance_name) {
-    if (!change_set_) return;
-    
-    auto* inst = block_->findInst(instance_name.c_str());
-    if (!inst) return;
-    
-    // Process all connection changes for this instance
-    for (auto& conn_change : change_set_->getConnectionChanges()) {
-        const auto& conn_info = conn_change->getInfo();
-        
-        if (conn_info.instance_name != instance_name) continue;
-        
-        odb::dbITerm* iterm = inst->findITerm(conn_info.pin_name.c_str());
-        if (!iterm) {
-            logger_->warn(utl::ECO, 303, "Pin {} not found on instance {}", 
-                         conn_info.pin_name, instance_name);
-            continue;
-        }
-        
-        switch (conn_change->getType()) {
-            case ChangeType::CONNECTION_ADDED:
-            case ChangeType::CONNECTION_MODIFIED: {
-                odb::dbNet* net = block_->findNet(conn_info.net_name.c_str());
-                if (!net) {
-                    logger_->warn(utl::ECO, 304, "Net {} not found", conn_info.net_name);
-                    continue;
-                }
-                iterm->connect(net);
-                logger_->info(utl::ECO, 305, "Connected {}.{} to net {}", 
-                             instance_name, conn_info.pin_name, conn_info.net_name);
-                break;
-            }
-            
-            case ChangeType::CONNECTION_REMOVED:
-                iterm->disconnect();
-                logger_->info(utl::ECO, 306, "Disconnected {}.{}", 
-                             instance_name, conn_info.pin_name);
-                break;
-                
-            default:
-                break;
-        }
-    }
+    return summary;
 }
 
   
+  long long  EcoDesignManager::getMaxRadius(odb::dbInst* instance){
+    //use db units
+    int inst_x, inst_y;
+    instance->getLocation(inst_x, inst_y);
+    odb::dbBox* bbox = instance->getBBox();
+    
+    if (bbox) {
+        inst_x = (bbox->xMin() + bbox->xMax()) / 2;
+        inst_y = (bbox->yMin() + bbox->yMax()) / 2;
+    }
+    long long min_x = inst_x;
+    long long max_y = inst_y;
+    
+    //get maximum radius of any instance
+    for (dbInst* cur_inst : block_->getInsts()) {
+      if (cur_inst == instance)
+	continue;
+      int cur_inst_x;
+      int cur_inst_y;
+      cur_inst ->getLocation(cur_inst_x, cur_inst_y);
 
-bool EcoDesignManager::implementChangeWithReroute(EcoChange* change) {
-    auto net_change = dynamic_cast<EcoNetChange*>(change);
-    if (!net_change) return false;
-    
-    // Implement net rerouting logic
-    change->setImplemented(true);
-    implemented_changes_++;
-    invalidateMetrics();
-    
-    logger_->info(utl::ECO, 103, "Implemented change with rerouting");
-    return true;
-}
+      max_y = cur_inst_y > max_y ? cur_inst_y: max_y;      
+      min_x = cur_inst_x < min_x ? cur_inst_x: min_x;
+    }
 
-bool EcoDesignManager::insertBuffer(EcoChange* change, int buffer_size) {
-    // Find available buffer spare cell
-    std::string buffer_type = "BUF_X" + std::to_string(buffer_size);
+    //get square of radius
+    long long  radius_squared = ((long long)(min_x)*(long long )(min_x)) +
+      ((long long)max_y* (long long)max_y);
+    long long unsigned radius_squared_u = min_x*min_x +
+      max_y*max_y;
+
+    return radius_squared;
+  }
+
+  
+std::vector<std::shared_ptr<SpareCell> > EcoDesignManager::findSpareCellsNear(
+    dbInst* instance, long long radius_squared_in) {
+
+  long long radius_squared = radius_squared_in / 2;
+  
+    std::vector<std::shared_ptr<SpareCell>> nearby_spares;
     
-    for (auto& cell : spare_cells_) {
-        if (!cell.used && cell.type.find("BUF") != std::string::npos) {
-            cell.used = true;
-            change->setImplemented(true);
-            implemented_changes_++;
-            invalidateMetrics();
-            
-            logger_->info(utl::ECO, 104, "Inserted buffer using spare cell {}", cell.name);
-            return true;
+    if (!instance) {
+        return nearby_spares;
+    }
+    
+    // Get instance location (center point)
+    int inst_x, inst_y;
+    instance->getLocation(inst_x, inst_y);
+
+    logger_->info(utl::ECO, 100, "Instance {} at x {} y {}",
+		  instance -> getName(),
+		  inst_x,
+		  inst_y);
+    
+    // Get instance bounding box to find center
+    odb::dbBox* bbox = instance->getBBox();
+    if (bbox) {
+        inst_x = (bbox->xMin() + bbox->xMax()) / 2;
+        inst_y = (bbox->yMin() + bbox->yMax()) / 2;
+    }
+    
+    
+    // Search through all spare cells
+    // spare cells previously harvested.
+    for (auto& spare : spare_cells_) {
+        // Get spare cell instance
+        dbInst* spare_inst = spare->instance;
+        if (!spare_inst) {
+            continue;
         }
-    }
-    
-    return false;
-}
-
-bool EcoDesignManager::resizeGate(EcoChange* change) {
-    // Gate resizing logic would go here
-    // This would involve finding a spare cell of different drive strength
-    
-    change->setImplemented(true);
-    implemented_changes_++;
-    invalidateMetrics();
-    
-    logger_->info(utl::ECO, 105, "Resized gate for timing optimization");
-    return true;
-}
-
-void EcoDesignManager::skipChange(EcoChange* change) {
-    change->setImplemented(true);  // Mark as processed but not actually implemented
-    logger_->info(utl::ECO, 106, "Skipped change: {}", change->getDescription());
-}
-
-double EcoDesignManager::getWorstSlack() const {
-    if (!metrics_valid_) {
-        const_cast<EcoDesignManager*>(this)->updateTimingMetrics();
-    }
-    return cached_worst_slack_;
-}
-
-double EcoDesignManager::getTotalWirelength() const {
-    if (!metrics_valid_) {
-        const_cast<EcoDesignManager*>(this)->updatePhysicalMetrics();
-    }
-    return cached_total_wirelength_;
-}
-
-double EcoDesignManager::getCongestionMetric() const {
-    if (!metrics_valid_) {
-        const_cast<EcoDesignManager*>(this)->updatePhysicalMetrics();
-    }
-    return cached_congestion_metric_;
-}
-
-double EcoDesignManager::getDistanceToChange(const SpareCell& cell, EcoChange* change) const {
-    // Get location associated with the change
-    auto gate_change = dynamic_cast<EcoGateChange*>(change);
-    if (gate_change) {
-        auto inst_change = gate_change->getInstanceChange();
-        if (inst_change && inst_change->getInfo().has_location) {
-            return computeDistance(cell.x, cell.y, 
-                                 inst_change->getInfo().x_coord,
-                                 inst_change->getInfo().y_coord);
-        }
-    }
-    
-    // Default to center of design if no location
-    if (block_) {
-        odb::Rect die_box = block_->getDieArea();
-        double center_x = (die_box.xMin() + die_box.xMax()) / 2.0 / block_->getDbUnitsPerMicron();
-        double center_y = (die_box.yMin() + die_box.yMax()) / 2.0 / block_->getDbUnitsPerMicron();
-        return computeDistance(cell.x, cell.y, center_x, center_y);
-    }
-    
-    return 0.0;
-}
-
-void EcoDesignManager::updateTimingAfterChange(Change* change) {
-    updateTimingMetrics();
-}
-
-void EcoDesignManager::updateTimingMetrics() {
-    if (!sta_) {
-        cached_worst_slack_ = 0.0;
-        return;
-    }
-    
-    // Update timing method inheritted from sta
-    sta_->updateTiming(false);
-    
-    // Get worst slack
-    cached_worst_slack_ = sta_->worstSlack(sta::MinMax::max());
-    
-    metrics_valid_ = true;
-}
-
-void EcoDesignManager::updatePhysicalMetrics() {
-    if (!block_) {
-        cached_total_wirelength_ = 0.0;
-        cached_congestion_metric_ = 0.0;
-        return;
-    }
-    
-    // Calculate total wirelength
-    double total_wl = 0.0;
-    for (odb::dbNet* net : block_->getNets()) {
-        if (net->isSpecial()) continue;
         
-        odb::dbWire* wire = net->getWire();
-        if (wire) {
-            // Simplified wirelength calculation
-            odb::Rect bbox;
-            bool first = true;
+        // Get spare cell location
+        int spare_x, spare_y;
+        spare_inst->getLocation(spare_x, spare_y);
+        
+        // Get spare cell center
+        odb::dbBox* spare_bbox = spare_inst->getBBox();
+        if (spare_bbox) {
+            spare_x = (spare_bbox->xMin() + spare_bbox->xMax()) / 2;
+            spare_y = (spare_bbox->yMin() + spare_bbox->yMax()) / 2;
+        }
+
+	
+        // Calculate squared distance (avoid sqrt for performance)
+        long long dx = static_cast<long long>(spare_x - inst_x);
+        long long dy = static_cast<long long>(spare_y - inst_y);
+        long long dist_squared = dx * dx + dy * dy;
+        /*
+        // Check if within radius
+	logger_->info(utl::ECO, 100, 
+		      "Seeking spare cell  dist_squared {} radius_squared {}",
+		      dist_squared,
+		      radius_squared);
+	*/
+
+        if (dist_squared <= static_cast<long long>(radius_squared)) {
+            nearby_spares.push_back(spare);
+        }
+    }
+    
+    // Sort by distance (closest first)
+    std::sort(nearby_spares.begin(), nearby_spares.end(),
+        [inst_x, inst_y](const std::shared_ptr<SpareCell>& a, 
+                         const std::shared_ptr<SpareCell>& b) {
+            dbInst* inst_a = a->instance;
+            dbInst* inst_b = b->instance;
             
-            for (odb::dbITerm* iterm : net->getITerms()) {
-                int x, y;
-                if (iterm->getAvgXY(&x, &y)) {
-                    if (first) {
-                        bbox.init(x, y, x, y);
-                        first = false;
-                    } else {
-                        bbox.merge(odb::Rect(x, y, x, y));
-                    }
+            if (!inst_a || !inst_b) {
+                return inst_a != nullptr;  // Put non-null first
+            }
+            
+            // Get centers
+            odb::dbBox* bbox_a = inst_a->getBBox();
+            odb::dbBox* bbox_b = inst_b->getBBox();
+            
+            int ax = bbox_a ? (bbox_a->xMin() + bbox_a->xMax()) / 2 : 0;
+            int ay = bbox_a ? (bbox_a->yMin() + bbox_a->yMax()) / 2 : 0;
+            int bx = bbox_b ? (bbox_b->xMin() + bbox_b->xMax()) / 2 : 0;
+            int by = bbox_b ? (bbox_b->yMin() + bbox_b->yMax()) / 2 : 0;
+            
+            // Calculate distances
+            long long dist_a = static_cast<long long>(ax - inst_x) * (ax - inst_x) + 
+                              static_cast<long long>(ay - inst_y) * (ay - inst_y);
+            long long dist_b = static_cast<long long>(bx - inst_x) * (bx - inst_x) + 
+                              static_cast<long long>(by - inst_y) * (by - inst_y);
+            
+            return dist_a < dist_b;
+        });
+    
+    return nearby_spares;
+}
+
+  
+  
+  std::shared_ptr<SpareCell> EcoDesignManager::findNearestSpare(
+    int x, int y, const std::string& type) {
+    
+    std::shared_ptr<SpareCell> nearest=nullptr;
+    double min_distance = std::numeric_limits<double>::max();
+    
+    // If type is specified, search only in that type
+    if (!type.empty() && spare_cells_by_type_.find(type) != spare_cells_by_type_.end()) {
+      for (std::shared_ptr<SpareCell> spare : spare_cells_by_type_[type]) {
+            if (!spare->is_used) {
+                double dx = spare->x - x;
+                double dy = spare->y - y;
+                double distance = std::sqrt(dx*dx + dy*dy);
+                
+                if (distance < min_distance) {
+                    min_distance = distance;
+                    nearest = spare;
                 }
             }
-            
-            if (!first) {
-                total_wl += (bbox.dx() + bbox.dy()) / static_cast<double>(block_->getDbUnitsPerMicron());
+        }
+    } else {
+        // Search all spare cells
+        for (auto spare : spare_cells_) {
+            if (!spare->is_used && (type.empty() || spare->type == type)) {
+                double dx = spare->x - x;
+                double dy = spare->y - y;
+                double distance = std::sqrt(dx*dx + dy*dy);
+                
+                if (distance < min_distance) {
+                    min_distance = distance;
+                    nearest = spare;
+                }
             }
         }
     }
-    cached_total_wirelength_ = total_wl;
     
-    // Simplified congestion metric (percentage of routing resources used)
-    // In a real implementation, this would query the router
-    cached_congestion_metric_ = 0.75;  // Placeholder value
-    
-    metrics_valid_ = true;
-}
-
-std::vector<EcoMove> EcoDesignManager::generatePossibleMoves() const {
-    std::vector<EcoMove> moves;
-    
-    auto* current = const_cast<EcoDesignManager*>(this)->getCurrentChange();
-    if (!current) {
-        return moves;
-    }
-    
-    // Always can skip
-    EcoMove skip_move;
-    skip_move.type = EcoMove::SKIP;
-    moves.push_back(skip_move);
-    
-    // Generate moves based on change type
-    auto gate_change = dynamic_cast<EcoGateChange*>(current);
-    if (gate_change) {
-        // Add moves for using each available spare cell
-        auto available_cells = getAvailableSpareCells();
-        for (const auto& cell : available_cells) {
-            EcoMove move;
-            move.type = EcoMove::USE_SPARE_CELL;
-            move.spare_cell_name = cell.name;
-            moves.push_back(move);
-        }
-    }
-    
-    auto net_change = dynamic_cast<EcoNetChange*>(current);
-    if (net_change) {
-        // Add net-related moves
-        EcoMove connect_move;
-        connect_move.type = EcoMove::CONNECT_NET;
-        moves.push_back(connect_move);
-        
-        EcoMove disconnect_move;
-        disconnect_move.type = EcoMove::DISCONNECT_NET;
-        moves.push_back(disconnect_move);
-    }
-    
-    // Add buffer insertion moves
-    for (int size = 1; size <= 4; ++size) {
-        EcoMove buffer_move;
-        buffer_move.type = EcoMove::BUFFER_NET;
-        buffer_move.buffer_size = size;
-        moves.push_back(buffer_move);
-    }
-    
-    return moves;
-}
-
-SpareCell* EcoDesignManager::findNearestSpareCell(const std::string& required_type, double x, double y) {
-  SpareCell* nearest = nullptr;
-  double min_dist = std::numeric_limits<double>::max();
-    
-    for (auto& cell : spare_cells_) {
-        if (!cell.used && areCellsCompatible(cell.type, required_type)) {
-            double dist = computeDistance(x, y, cell.x, cell.y);
-            if (dist < min_dist) {
-                min_dist = dist;
-                nearest = &cell;
-            }
-        }
-    }
     return nearest;
 }
 
+
+void EcoDesignManager::capturePreMoveMetrics(double& tns, double& area, double& wire_length) {
+    tns = evaluateTotalNegativeSlack();
+    area = evaluateDesignArea();
+    wire_length = evaluateTotalWireLength();
+}
+
+
+EcoDesignManager::MoveResult EcoDesignManager::calculateMoveImpact(
+    double pre_tns, double pre_area, double pre_wire) {
+    
+    MoveResult result;
+    double post_tns = evaluateTotalNegativeSlack();
+    double post_area = evaluateDesignArea();
+    double post_wire = evaluateTotalWireLength();
+    
+    result.timing_improvement = pre_tns - post_tns;  // Positive is good
+    result.area_delta = post_area - pre_area;
+    result.wire_length_delta = post_wire - pre_wire;
+    result.success = true;
+    return result;
+}
+
+
+  /*
+    Preview the resizing
+  */
+  
+  EcoDesignManager::MoveResult EcoDesignManager::previewResize(
+							       odb::dbInst* inst,
+							       odb::dbInst* spare_inst
+					     ){
+    // Capture initial metrics
+    double initial_tns, initial_area, initial_wire;
+    capturePreMoveMetrics(initial_tns, initial_area, initial_wire);
+    
+    // Use Resizer's journaling
+    resizer_->journalBegin();
+    
+    // Perform the resize
+    MoveResult result = performInstanceSwap(inst, spare_inst);
+    
+    // Restore original state
+    resizer_->journalRestore();
+    
+    // Result contains timing_improvement without permanent changes
+    return result;
+  }
+
+  
+  EcoDesignManager::MoveResult EcoDesignManager::performInstanceSwap(
+							     odb::dbInst* inst,
+							     odb::dbInst* spare_inst){
+
+    /*    printf("Swapping Instance %s (cell %s)  with spare instance %s (cell %s)\n",
+	   inst -> getName().c_str(),
+	   inst -> getMaster() -> getName().c_str(),
+	   spare_inst -> getName().c_str(),
+	   spare_inst -> getMaster() -> getName().c_str()
+	   );
+    */
+    // Record initial metrics
+    double initial_tns, initial_area, initial_wire;
+    capturePreMoveMetrics(initial_tns, initial_area, initial_wire);
+
+    // Find the instance
+    if (inst == nullptr) {
+      return {false, 0.0, 0.0, 0.0, "Instance not found: " + inst-> getName()};
+    }
+    if (spare_inst == nullptr) {
+      return {false, 0.0, 0.0, 0.0, "Instance not found: " + spare_inst-> getName()};
+    }
+
+    //disconnect the inst
+    std::map<std::string,odb::dbNet*> pin2net;
+    for (auto iterm: inst->getITerms()){
+      pin2net[iterm -> getMTerm() -> getName()] = iterm -> getNet();
+      iterm -> disconnect();
+    }
+    
+    //connect up the spare inst
+    for (auto iterm: spare_inst -> getITerms()){
+      odb::dbNet* cur_net = pin2net[iterm -> getMTerm() -> getName()];
+      assert(cur_net);
+      iterm -> connect(cur_net);
+    }
+    
+    // Update timing
+    sta_->updateTiming(false);
+    
+    // Calculate impact
+    MoveResult result = calculateMoveImpact(initial_tns, initial_area, initial_wire);
+    return result;
+  }
+  
+  
+EcoDesignManager::MoveResult EcoDesignManager::performResize(
+							     odb::dbInst* inst,
+							     odb::dbInst* spare_inst){
+    
+    // Record initial metrics
+    double initial_tns, initial_area, initial_wire;
+    capturePreMoveMetrics(initial_tns, initial_area, initial_wire);
+    
+    // Find the instance
+    if (!inst) {
+      return {false, 0.0, 0.0, 0.0, "Instance not found: " + inst-> getName()};
+    }
+
+    
+    /*
+    // Check if we need to use a spare cell
+    if (isSpareCell(inst)) {
+    
+      printf("Not sure what the hell this does!\n");
+
+        // Handle spare cell replacement
+      std::string new_master_name = spare_inst-> getName();
+        dbMaster* new_master = db_->findMaster(new_master_name.c_str());
+        if (!new_master) {
+	  return {false, 0.0, 0.0, 0.0, "Master cell not found: " + new_master_name};
+        }
+        
+        std::string spare_type = getSpareType(new_master);
+	std::shared_ptr<SpareCell> spare = findNearestSpare(target_inst->getBBox()->xMin(), 
+					    target_inst->getBBox()->yMin(), 
+					    spare_type);
+        if (!spare) {
+	  return {false, 0.0, 0.0, 0.0, "No suitable spare cell available"};
+        }
+        // Perform the spare cell swap
+        performSpareCellSwap(target_inst, spare, new_master);
+
+    } else {
+        // For regular cells, use Resizer's functionality
+        sta::Instance* sta_inst = dbsta_->getDbNetwork()->dbToSta(inst);
+        sta::LibertyCell* new_cell = dbsta_ -> getDbNetwork() ->
+	  findLibertyCell(spare_inst -> getMaster() -> getName().c_str());
+        
+        if (!new_cell) {
+	  return {false, 0.0, 0.0, 0.0, "New master cell not found: " + new_master_name};
+        }
+        
+        // Check if this is a valid swap using Resizer's logic
+        sta::LibertyCell* current_cell = resizer_->getDbNetwork()->libertyCell(sta_inst);
+        auto swappable_cells = resizer_->getSwappableCells(current_cell);
+
+	printf("Source cell type %s\n", inst -> getMaster() -> getName().c_str());
+	
+        bool is_valid_swap = false;
+        for (auto cell : swappable_cells) {
+	  printf("Allowed swappable cell %s\n", cell -> name());
+	  if (cell == new_cell) {
+	    is_valid_swap = true;
+	    break;
+	  }
+        }
+        
+        if (!is_valid_swap) {
+	  //
+	  //try a spare cell ???
+	  //
+	  return {false, 0.0, 0.0, 0.0, "Cell swap not valid according to Resizer rules"};
+        }
+        
+        // Use Resizer's replaceCell 
+        if (!resizer_->replaceCell(sta_inst, new_cell, true)) {
+	  return {false, 0.0, 0.0, 0.0, "Failed to replace cell"};
+        }
+    }
+    */
+
+    // Update timing
+    sta_->updateTiming(false);
+    
+    // Calculate impact
+    MoveResult result = calculateMoveImpact(initial_tns, initial_area, initial_wire);
+
+    return result;
+}
+
+
+
+  
+void EcoDesignManager::performSpareCellSwap(dbInst* target_inst, 
+					    std::shared_ptr<SpareCell> spare,
+					    dbMaster* new_master) {
+    // Save connections from target
+    std::unordered_map<std::string, dbNet*> pin_connections;
+    for (dbITerm* iterm : target_inst->getITerms()) {
+        if (iterm->getNet()) {
+            pin_connections[iterm->getMTerm()->getName()] = iterm->getNet();
+        }
+    }
+    
+    // Swap the spare cell master
+    spare->instance->swapMaster(new_master);
+    spare->is_used = true;
+    
+    // Transfer connections
+    for (const auto& [pin_name, net] : pin_connections) {
+        dbITerm* spare_iterm = spare->instance->findITerm(pin_name.c_str());
+        if (spare_iterm) {
+            spare_iterm->connect(net);
+        }
+    }
+    
+    // Disconnect original instance
+    for (dbITerm* iterm : target_inst->getITerms()) {
+        iterm->disconnect();
+    }
+}
+
+
   
 
-double EcoDesignManager::computeDistance(double x1, double y1, double x2, double y2) const {
-    // Manhattan distance
-    return std::abs(x1 - x2) + std::abs(y1 - y2);
-}
-
-void EcoDesignManager::convertChangesToEcoChanges() {
-    all_changes_.clear();
-    unimplemented_changes_ = std::queue<std::shared_ptr<EcoChange>>(); // Clear the queue
-    
-    if (!change_set_) return;
-    
-    // Convert instance changes
-    for (auto& change : change_set_->getAddedInstances()) {
-        auto eco_change = std::make_shared<EcoGateChange>(change);
-        all_changes_.push_back(eco_change);
-        unimplemented_changes_.push(eco_change);
-    }
-    
-    for (auto& change : change_set_->getRemovedInstances()) {
-        auto eco_change = std::make_shared<EcoGateChange>(change);
-        all_changes_.push_back(eco_change);
-        unimplemented_changes_.push(eco_change);
-    }
-    
-    // Convert connection changes
-    for (auto& change : change_set_->getConnectionChanges()) {
-        auto eco_change = std::make_shared<EcoNetChange>(change);
-        all_changes_.push_back(eco_change);
-        unimplemented_changes_.push(eco_change);
-    }
-    
-    // Convert net changes - you might want to handle these differently
-    for (auto& change : change_set_->getNetChanges()) {
-      (void)change;
-      //TODO:
-      // Net changes might need a different EcoChange type
-      // For now, we'll skip them or you could create an EcoNetModifyChange class
-    }
-}
-
-  
-
-odb::dbInst* EcoDesignManager::createInstance(const std::string& name, 
-                                             const std::string& cell_type, 
-                                             double x, double y) {
-    // Implementation would create a new instance
-    // This is a placeholder
-    return nullptr;
-}
-
-bool EcoDesignManager::connectPin(odb::dbInst* inst, const std::string& pin_name, odb::dbNet* net) {
-    if (!inst || !net) return false;
-    
-    odb::dbITerm* iterm = inst->findITerm(pin_name.c_str());
-    if (!iterm) return false;
-    
-    iterm->connect(net);
-    return true;
-}
-
-bool EcoDesignManager::disconnectPin(odb::dbInst* inst, const std::string& pin_name) {
-    if (!inst) return false;
-    
-    odb::dbITerm* iterm = inst->findITerm(pin_name.c_str());
-    if (!iterm) return false;
-    
-    iterm->disconnect();
-    return true;
-}
-
-odb::dbNet* EcoDesignManager::createNet(const std::string& name) {
-    if (!block_) return nullptr;
-    return odb::dbNet::create(block_, name.c_str());
-}
-
-bool EcoDesignManager::applyAllChanges() {
-    if (!change_set_) {
-        logger_->error(utl::ECO, 307, "No ECO changes loaded");
+bool EcoDesignManager::routeNet(dbNet* net) {
+    if (!net || !router_) {
         return false;
     }
     
-    int success_count = 0;
-    int skip_count = 0;
-    
-    // First handle instance additions
-    for (auto& inst_change : change_set_->getAddedInstances()) {
-        const auto& info = inst_change->getInfo();
-        
-        // Find compatible spare cell
-        double x = info.has_location ? info.x_coord : 0.0;
-        double y = info.has_location ? info.y_coord : 0.0;
-        
-        SpareCell* spare = findNearestSpareCell(info.cell_type, x, y);
-        
-        if (spare) {
-            auto eco_change = std::make_shared<EcoGateChange>(inst_change);
-            if (implementChangeWithSpareCell(eco_change.get(), *spare)) {
-                success_count++;
-            }
-        } else {
-            logger_->warn(utl::ECO, 308, "No compatible spare cell for {} ({})", 
-                         info.name, info.cell_type);
-            skip_count++;
-        }
-    }
-    
-    // Then handle net additions
-    for (auto& net_change : change_set_->getNetAdditions()) {
-        const auto& info = net_change->getInfo();
-        
-        // Create the net
-        odb::dbNet* net = odb::dbNet::create(block_, info.name.c_str());
-        if (net) {
-            logger_->info(utl::ECO, 309, "Created net {}", info.name);
-            success_count++;
-        }
-    }
-    
-    logger_->info(utl::ECO, 310, "Applied {} changes, skipped {}", 
-                 success_count, skip_count);
-    
-    return success_count > 0;
-}
- 
-void EcoDesignManager::writeDEF(const std::string& filename) {
-    if (!block_) {
-        logger_->error(utl::ECO, 311, "No design loaded");
-        return;
-    }
-    
-    odb::DefOut writer(logger_);
-    writer.writeBlock(block_, filename.c_str());
-    logger_->info(utl::ECO, 312, "Wrote modified DEF to {}", filename);
-}
-
-
-
-
-
-bool EcoDesignManager::routeConnection(const std::string& instance_name, 
-                                      const std::string& pin_name, 
-                                      const std::string& net_name) {
-    odb::dbInst* inst = block_->findInst(instance_name.c_str());
-    if (!inst) return false;
-    
-    odb::dbITerm* iterm = inst->findITerm(pin_name.c_str());
-    if (!iterm) return false;
-    
-    odb::dbNet* net = block_->findNet(net_name.c_str());
-    if (!net) return false;
-    
-    // Create wire if it doesn't exist
-    odb::dbWire* wire = net->getWire();
-    if (!wire) {
-        wire = odb::dbWire::create(net);
-    }
-    
-    // Find a metal-only route from the pin to an existing segment of the net
-    return findMetalRoute(iterm, net);
-}
-
-  
-bool EcoDesignManager::eco_route_changes() {
-    logger_->info(utl::ECO, 400, "Applying ECO connection changes");
-    
-    if (!change_set_) {
-        logger_->warn(utl::ECO, 406, "No change set loaded");
-        return false;
-    }
-    
-    std::set<odb::dbNet*> modified_nets;
-    int connections_made = 0;
-    
-    // Process all connection changes from the change set
-    for (auto& conn_change : change_set_->getConnectionChanges()) {
-        const auto& info = conn_change->getInfo();
-        
-        odb::dbInst* inst = block_->findInst(info.instance_name.c_str());
-        if (!inst) {
-            logger_->warn(utl::ECO, 407, "Instance {} not found for connection change", 
-                         info.instance_name);
-            continue;
-        }
-        
-        odb::dbITerm* iterm = inst->findITerm(info.pin_name.c_str());
-        if (!iterm) {
-            logger_->warn(utl::ECO, 408, "Pin {}.{} not found", 
-                         info.instance_name, info.pin_name);
-            continue;
-        }
-        
-        odb::dbNet* net = block_->findNet(info.net_name.c_str());
-        if (!net) {
-            logger_->warn(utl::ECO, 409, "Net {} not found", info.net_name);
-            continue;
-        }
-        
-        // Make the connection
-        iterm->connect(net);
-        modified_nets.insert(net);
-        connections_made++;
-        
-        logger_->info(utl::ECO, 403, "Connected {}.{} to net {}", 
-                     info.instance_name, info.pin_name, info.net_name);
-    }
-    
-    logger_->info(utl::ECO, 401, "Made {} connections across {} nets. Ready for routing.", 
-                 connections_made, modified_nets.size());
-    logger_->info(utl::ECO, 402, "Run global_route and detailed_route commands to complete routing.");
-    
-    return connections_made > 0;
-}
-  
-  
-bool EcoDesignManager::findMetalRoute(odb::dbITerm* from_iterm, odb::dbNet* to_net) {
-    // Simply ensure the logical connection is made
-    if (from_iterm->getNet() != to_net) {
-        from_iterm->connect(to_net);
-    }
-    
-    logger_->info(utl::ECO, 403, "Connected {}.{} to net {} (ready for routing)", 
-                 from_iterm->getInst()->getName(), 
-                 from_iterm->getMTerm()->getName(),
-                 to_net->getName());
-    
-    // Mark the net as modified/needs routing by setting wire ordered to false
-    to_net->setWireOrdered(false);
-    
+    // For actual routing, integrate with GlobalRouter
+    // This is a placeholder - actual implementation would call:
+    // router_->routeNet(net);
+    printf("Unsupported route\n");
     return true;
 }
 
-  
-odb::dbTechLayer* EcoDesignManager::getRoutingLayer(int layer_num) {
-    std::string layer_name = "METAL" + std::to_string(layer_num);
-    return block_->getTech()->findLayer(layer_name.c_str());
-}
-
-
-void EcoDesignManager::writeRoutedDEF(const std::string& filename) {
-    writeDEF(filename);  // Reuse existing method
-    logger_->info(utl::ECO, 405, "Wrote routed ECO design to {}", filename);
-}
-
-  bool EcoDesignManager::applyEcoChanges() {
-    logger_->info(utl::ECO, 300, "Applying ECO instance changes");
-    
-    if (!change_set_) {
-        logger_->warn(utl::ECO, 313, "No change set loaded");
+bool EcoDesignManager::unrouteNet(dbNet* net) {
+    if (!net) {
         return false;
     }
+    // Remove routing for the net (segments)
+    net->destroySWires();
+    return true;
+}
+
+dbInst* EcoDesignManager::insertSpareCell(const std::string& spare_master_name,
+                                         const std::string& instance_name,
+                                         int x, int y) {
+    dbMaster* master = db_->findMaster(spare_master_name.c_str());
+    if (!master) {
+        return nullptr;
+    }
     
-    int changes_applied = 0;
+    // Create new instance
+    dbInst* inst = dbInst::create(block_, master, instance_name.c_str());
+    if (!inst) {
+        return nullptr;
+    }
     
-    // 1. Process instance additions (spare cell repurposing)
-    for (auto& inst_change : change_set_->getAddedInstances()) {
-        const auto& info = inst_change->getInfo();
+    // Set location
+    inst->setLocation(x, y);
+    inst->setPlacementStatus(dbPlacementStatus::PLACED);
+    
+    // Add to spare cell tracking
+    std::shared_ptr<SpareCell> spare = std::make_shared<SpareCell>();
+    spare -> instance = inst;
+    spare -> master = master;
+    spare -> x = x;
+    spare -> y = y;
+    spare -> is_used = false;
+    spare -> type = getSpareType(master);
+    
+    spare_cells_.push_back(spare);
+    // Update spare cells by type
+    spare_cells_by_type_[spare->type].push_back(spare_cells_.back());
+    
+    return inst;
+}
+
+
+  /* 
+     Timing apis
+   */
+
+std::vector<PathInfo> EcoDesignManager::getCriticalPaths(int path_count) {
+    std::vector<PathInfo> critical_paths;
+    
+    if (!sta_) {
+        logger_->error(utl::ECO, 1, "STA not initialized");
+        return critical_paths;
+    }
+    
+    // Update timing to ensure we have current data
+    sta_->updateTiming(false);
+    
+    // Get worst paths from all path groups
+    sta::PathEndSeq path_ends = sta_->findPathEnds(
+        nullptr,  // from (nullptr = any)
+        nullptr,  // thrus 
+        nullptr,  // to (nullptr = any)
+        false,    // unconstrained
+        nullptr,  // corner (nullptr = all corners)
+        sta::MinMaxAll::max(),  // max for setup checks
+        path_count,  // group_count - paths per group
+        path_count,  // endpoint_count - paths per endpoint
+        true,     // unique_pins
+        false,    // unique_edges
+        -sta::INF,  // slack_min
+        sta::INF,   // slack_max
+        true,     // sort_by_slack
+        nullptr,  // group_names (nullptr = all groups)
+        true,     // setup
+        false,    // hold
+        false,    // recovery
+        false,    // removal
+        false,    // clk_gating_setup
+        false     // clk_gating_hold
+    );
+    
+    if (path_ends.empty()) {
+        logger_->info(utl::ECO, 100, "No critical paths found");
+        return critical_paths;
+    }
+    
+    // Convert STA paths to our PathInfo structure
+    int path_index = 0;
+    for (sta::PathEnd* path_end : path_ends) {
+        if (!path_end) continue;
         
-        // Find and repurpose a spare cell
-        double x = info.has_location ? info.x_coord : 0.0;
-        double y = info.has_location ? info.y_coord : 0.0;
+        PathInfo info;
+        info.slack = path_end->slack(sta_);
+        info.index = path_index++;
         
-        SpareCell* spare = findNearestSpareCell(info.cell_type, x, y);
+        // Skip paths with positive slack if we have enough critical ones
+        if (info.slack > 0 && critical_paths.size() >= static_cast<size_t>(path_count / 2)) {
+            continue;
+        }
         
-        if (spare && spare->db_inst) {
-            // Rename the spare cell to the new instance name
-            spare->db_inst->rename(info.name.c_str());
-            spare->used = true;
+        // Store the path
+        info.sta_path = path_end->path();
+        
+        // Extract instances and nets along the path
+        extractPathElements(path_end->path(), info.instances, info.nets);
+        
+        critical_paths.push_back(info);
+        
+        // Stop if we have enough paths
+        if (critical_paths.size() >= static_cast<size_t>(path_count)) {
+            break;
+        }
+    }
+    
+    // Log summary
+    if (!critical_paths.empty()) {
+        logger_->info(utl::ECO, 101, 
+            "Found {} critical paths, WNS = {:.2f} ps", 
+            critical_paths.size(), 
+            critical_paths[0].slack * 1e12);  // Convert to ps
+    }
+    
+    return critical_paths;
+}
+  
+  
+
+// Helper method to extract instances and nets from a path
+void EcoDesignManager::extractPathElements(sta::Path* path,
+                                         std::vector<odb::dbInst*>& instances,
+                                         std::vector<odb::dbNet*>& nets) {
+    instances.clear();
+    nets.clear();
+    
+    if (!path) return;
+    
+    // Use PathExpanded to get the full path
+    sta::PathExpanded expanded(path, sta_);
+    
+    for (size_t i = 0; i < expanded.size(); i++) {
+        const sta::Path* path_ref = expanded.path(i);
+        sta::Pin* pin = path_ref->pin(sta_);
+        
+        if (pin) {
+            // Get instance from pin
+            odb::dbITerm* iterm = nullptr;
+            odb::dbBTerm* bterm = nullptr;
+	    odb::dbModITerm* moditerm=nullptr;
+	    
+            // Convert sta Pin to db pin - need to use the network adapter
+	    sta::dbNetwork* db_network = resizer_ -> getDbNetwork();
+
+	    db_network -> staToDb(pin, iterm, bterm, moditerm);
             
-            logger_->info(utl::ECO, 314, "Repurposed spare cell {} as {} ({})", 
-                         spare->name, info.name, info.cell_type);
-            changes_applied++;
-        } else {
-            logger_->warn(utl::ECO, 315, "No compatible spare cell for {} ({})", 
-                         info.name, info.cell_type);
-        }
-    }
-    
-    // 2. Process instance removals (disconnect and mark as unused)
-    for (auto& inst_change : change_set_->getRemovedInstances()) {
-        const auto& info = inst_change->getInfo();
-        odb::dbInst* inst = block_->findInst(info.name.c_str());
-        
-        if (inst) {
-            // Disconnect all pins
-            for (odb::dbITerm* iterm : inst->getITerms()) {
-                iterm->disconnect();
+            if (iterm) {
+                odb::dbInst* inst = iterm->getInst();
+                
+                // Add instance if not already in list
+                if (inst && (instances.empty() || instances.back() != inst)) {
+                    instances.push_back(inst);
+                }
+                
+                // Get net connected to this pin
+                odb::dbNet* net = iterm->getNet();
+                if (net && (nets.empty() || nets.back() != net)) {
+                    nets.push_back(net);
+                }
+            } else if (bterm) {
+                // Handle top-level port connections
+                odb::dbNet* net = bterm->getNet();
+                if (net && (nets.empty() || nets.back() != net)) {
+                    nets.push_back(net);
+                }
             }
-            logger_->info(utl::ECO, 316, "Disconnected instance {}", info.name);
-            changes_applied++;
+        }
+    }
+}
+
+std::vector<PathInfo> EcoDesignManager::getPathsThroughInstance(
+    odb::dbInst* inst, 
+    int max_paths) {
+    
+    std::vector<PathInfo> paths;
+    
+    if (!inst || !sta_) return paths;
+    
+    // Create a pin set for all pins of this instance
+    sta::PinSet* through_pins = new sta::PinSet;
+    
+    for (odb::dbITerm* iterm : inst->getITerms()) {
+      sta::Pin* pin = resizer_ -> getDbNetwork()->dbToSta(iterm);
+        if (pin) {
+            through_pins->insert(pin);
         }
     }
     
-    logger_->info(utl::ECO, 302, "Applied {} instance changes", changes_applied);
-    return changes_applied > 0;
+    // Create exception through specification
+    sta::ExceptionThru* thru = sta_->makeExceptionThru(
+        through_pins,
+        nullptr,  // nets
+        nullptr,  // instances
+        sta::RiseFallBoth::riseFall()
+    );
+    
+    sta::ExceptionThruSeq* thrus = new sta::ExceptionThruSeq;
+    thrus->push_back(thru);
+    
+    // Find paths through these pins
+    sta::PathEndSeq path_ends = sta_->findPathEnds(
+        nullptr,  // from
+        thrus,    // through this instance
+        nullptr,  // to
+        false,    // unconstrained
+        nullptr,  // corner
+        sta::MinMaxAll::max(),
+        max_paths,
+        max_paths,
+        true,     // unique pins
+        false,    // unique edges
+        -sta::INF,
+        0.0,      // Only negative slack
+        true,     // sort_by_slack
+        nullptr,  // group_names
+        true,     // setup
+        false,    // hold
+        false,    // recovery
+        false,    // removal
+        false,    // clk_gating_setup
+        false     // clk_gating_hold
+    );
+    
+    // Process the path ends
+    for (sta::PathEnd* path_end : path_ends) {
+        if (!path_end) continue;
+        
+        PathInfo info;
+        info.sta_path = path_end->path();
+        info.slack = path_end->slack(sta_);
+        info.index = paths.size();
+        
+        extractPathElements(info.sta_path, info.instances, info.nets);
+        paths.push_back(info);
+        
+        if (paths.size() >= static_cast<size_t>(max_paths)) {
+            break;
+        }
+    }
+    
+    // Clean up
+    sta_->deleteExceptionThru(thru);
+    delete thrus;
+    // Note: through_pins is owned by thru and will be deleted with it
+    
+    return paths;
+}
+
+// Similarly for getCriticalPathsThroughNet
+std::vector<PathInfo> EcoDesignManager::getCriticalPathsThroughNet(
+    odb::dbNet* net, 
+    int max_paths) {
+    
+    std::vector<PathInfo> paths;
+    
+    if (!net || !sta_) return paths;
+    
+    // Create a net set for the exception
+    sta::NetSet* through_nets = new sta::NetSet;
+    sta::Net* sta_net = resizer_ -> getDbNetwork()->dbToSta(net);
+    
+    if (!sta_net) {
+        delete through_nets;
+        return paths;
+    }
+    
+    through_nets->insert(sta_net);
+    
+    // Create exception through specification
+    sta::ExceptionThru* thru = sta_->makeExceptionThru(
+        nullptr,  // pins
+        through_nets,  // this net
+        nullptr,  // instances
+        sta::RiseFallBoth::riseFall()
+    );
+    
+    sta::ExceptionThruSeq* thrus = new sta::ExceptionThruSeq;
+    thrus->push_back(thru);
+    
+    // Find paths through this net
+    sta::PathEndSeq path_ends = sta_->findPathEnds(
+        nullptr,  // from
+        thrus,    // through this net
+        nullptr,  // to
+        false,    // unconstrained
+        nullptr,  // corner
+        sta::MinMaxAll::max(),
+        max_paths,
+        max_paths,
+        true,     // unique pins
+        false,    // unique edges
+        -sta::INF,
+        0.0,      // Only negative slack
+        true,     // sort_by_slack
+        nullptr,  // group_names
+        true,     // setup
+        false,    // hold
+        false,    // recovery
+        false,    // removal
+        false,    // clk_gating_setup
+        false     // clk_gating_hold
+    );
+    
+    // Process the path ends
+    for (sta::PathEnd* path_end : path_ends) {
+        if (!path_end) continue;
+        
+        PathInfo info;
+        info.sta_path = path_end->path();
+        info.slack = path_end->slack(sta_);
+        info.index = paths.size();
+        
+        extractPathElements(info.sta_path, info.instances, info.nets);
+        paths.push_back(info);
+        
+        if (paths.size() >= static_cast<size_t>(max_paths)) {
+            break;
+        }
+    }
+    
+    // Clean up
+    sta_->deleteExceptionThru(thru);
+    delete thrus;
+    // Note: through_nets is owned by thru and will be deleted with it
+    
+    return paths;
 }
   
-} // namespace eco
+
+
+double EcoDesignManager::evaluateTimingSlack(const std::string& pin_name) {
+    // Find the pin
+    auto parts = splitPinName(pin_name);
+    if (parts.first.empty() || parts.second.empty()) {
+        return 0.0;
+    }
+    
+    dbInst* inst = block_->findInst(parts.first.c_str());
+    if (!inst) {
+        return 0.0;
+    }
+    
+    dbITerm* iterm = inst->findITerm(parts.second.c_str());
+    if (!iterm) {
+        return 0.0;
+    }
+    
+    // Convert to STA pin and get slack
+    sta::Pin* sta_pin = resizer_->getDbNetwork()->dbToSta(iterm);
+    if (!sta_pin) {
+        return 0.0;
+    }
+    
+    return sta_->pinSlack(sta_pin, sta::MinMax::max());
+}
+
+double EcoDesignManager::evaluateTotalNegativeSlack() {
+    // Use STA functionality to get TNS
+    sta_->ensureGraph();
+    sta_->searchPreamble();
+    double tns = sta_->totalNegativeSlack(sta_->cmdCorner(), sta::MinMax::max());
+    sta::Unit *unit = Sta::sta()->units()->timeUnit();
+    double tns_out = unit -> staToUser(tns); 
+    return tns_out;
+}
+
+double EcoDesignManager::evaluateWorstNegativeSlack() {
+  
+    sta_->ensureGraph();
+    sta_->searchPreamble();
+    Slack worst_slack;
+    Vertex* worst_vertex;
+    Sta::sta()->worstSlack(sta::MinMax::max(),worst_slack, worst_vertex);
+    sta::Unit *unit = Sta::sta()->units()->timeUnit();
+    double worst_slack_out = unit -> staToUser(worst_slack); 
+    return worst_slack_out;
+}
+
+  double EcoDesignManager::evaluateTotalPower(){
+    printf("Evaluate total power todo!\n");
+    return 0.1;
+  }
+  
+double EcoDesignManager::evaluateDesignArea() {
+    // Use Resizer's area calculation
+    return resizer_->designArea();
+}
+
+double EcoDesignManager::evaluateTotalWireLength() {
+    double total_length = 0.0;
+    
+    // Calculate actual wire length from routed nets
+    for (dbNet* net : block_->getNets()) {
+        dbWire* wire = net->getWire();
+        if (wire) {
+            // Get wire length in DBU and convert to microns
+            uint64_t wire_length_dbu = wire->getLength();
+            double dbu_per_micron = block_->getDbUnitsPerMicron();
+            total_length += wire_length_dbu / dbu_per_micron;
+        }
+    }
+    
+    return total_length;
+}
+
+
+
+// Helper function to split instance_name/pin_name format
+std::pair<std::string, std::string> EcoDesignManager::splitPinName(const std::string& pin_name) {
+    size_t slash_pos = pin_name.find('/');
+    if (slash_pos != std::string::npos) {
+        return {pin_name.substr(0, slash_pos), pin_name.substr(slash_pos + 1)};
+    }
+    return {"", ""};
+}
+
+
+// Buffer insertion using Resizer
+EcoDesignManager::MoveResult EcoDesignManager::insertBuffer(
+    const std::string& net_name,
+    const std::string& buffer_type,
+    int x, int y) {
+    
+    // Record initial metrics
+    double initial_tns, initial_area, initial_wire;
+    capturePreMoveMetrics(initial_tns, initial_area, initial_wire);
+    
+    // Find the net
+    dbNet* net = block_->findNet(net_name.c_str());
+    if (!net) {
+        return {false, 0.0, 0.0, 0.0, "Net not found: " + net_name};
+    }
+    
+    
+    // Convert to STA net
+    sta::Net* sta_net = resizer_->getDbNetwork()->dbToSta(net);
+    
+    // Find buffer cell
+    sta::LibertyCell* buffer_cell = dbsta_ -> getDbNetwork() -> findLibertyCell(buffer_type.c_str());
+    if (!buffer_cell) {
+        return {false, 0.0, 0.0, 0.0, "Buffer cell not found: " + buffer_type};
+    }
+    
+    // Use Resizer's buffer insertion (which will be journaled)
+    Point loc(x, y);
+    sta::Instance* buffer = resizer_->insertBufferAfterDriver(
+        sta_net, buffer_cell, &loc);
+    
+    if (!buffer) {
+        return {false, 0.0, 0.0, 0.0, "Failed to insert buffer"};
+    }
+    
+    // Update timing
+    sta_->updateTiming(true);
+    
+    // Calculate impact
+    MoveResult result = calculateMoveImpact(initial_tns, initial_area, initial_wire);
+    
+    return result;
+}
+
+  /* Helpers */
+
+  bool EcoDesignManager::areCompatibleMasters(const std::string& spare_master,
+					      const std::string& inst_master) const{
+    if (spare_master == inst_master){
+      return true;
+    }
+    std::string spare_base_name = extractBaseName(spare_master);
+    std::string inst_base_name = extractBaseName(inst_master);
+
+    if (spare_base_name == inst_base_name){
+      if (arePinCompatible(spare_base_name, inst_base_name)){
+	return true;
+      }
+    }
+    return false;
+  }
+
+  
+  
+  //Get the area of a master cell
+  double EcoDesignManager::getMasterArea(const std::string& master_name) {
+    // First try Liberty cell (has area directly)
+    sta::LibertyCell* lib_cell = dbsta_->getDbNetwork()->findLibertyCell(master_name.c_str());
+    if (lib_cell) {
+        float area = lib_cell->area();
+        if (area > 0) {
+            return area; // Already in square microns
+        }
+    }
+    
+    // Fall back to dbMaster
+    odb::dbMaster* master = db_->findMaster(master_name.c_str());
+    if (!master) {
+        logger_->warn(utl::ECO, 201, "Cannot find master {}", master_name);
+        return 0.0;
+    }
+    
+    // Skip non-placeable cells (like pads, macros)
+    if (!master->isCoreAutoPlaceable()) {
+        return 0.0;
+    }
+    
+    // Method 1: Direct area (if available)
+    uint64_t area = master->getArea();
+    if (area > 0) {
+        double dbu_per_micron = block_->getDbUnitsPerMicron();
+        return area / (dbu_per_micron * dbu_per_micron);
+    }
+    
+    // Method 2: Width × Height
+    double dbu_per_micron = block_->getDbUnitsPerMicron();
+    double width_um = master->getWidth() / dbu_per_micron;
+    double height_um = master->getHeight() / dbu_per_micron;
+    
+    return width_um * height_um;
+}
+
+  void EcoDesignManager::reportSpareCells(){
+    for (auto spare: spare_cells_){
+      logger_->info(utl::ECO, 100, "Spare Cell Instance {} with Master {}  of type {} at x {} y {}",
+		    spare -> instance-> getName(),
+		    spare -> master -> getName(),
+		    spare -> type,
+		    spare -> x,
+		    spare -> y
+		    );
+    }
+  }
+  
+}

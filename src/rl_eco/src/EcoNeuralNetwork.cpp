@@ -42,10 +42,14 @@ void Layer::initializeWeights(double scale) {
   
 
 std::vector<double> Layer::forward(const std::vector<double>& input) {
+  if (input.size() != input_size_){
+    printf("Cannot forward propagate, input size mis-match\n");
+  }
     assert(input.size() == input_size_);
     last_input_ = input;
     
     std::vector<double> output(output_size_, 0.0);
+    printf("*Output size %d\n", output_size_);
     
     // Compute linear transformation
     for (size_t i = 0; i < output_size_; ++i) {
@@ -143,7 +147,12 @@ std::vector<double> Layer::activateDerivative(const std::vector<double>& x) {
 NeuralNetwork::NeuralNetwork(const std::vector<size_t>& layer_sizes,
                            const std::vector<ActivationType>& activations) {
     assert(layer_sizes.size() >= 2);
-    
+
+    int ix=0;
+    for (auto s: layer_sizes){
+      printf("Layer %d Size %d\n", ix, s);
+      ix++;
+    }
     std::vector<ActivationType> acts = activations;
     if (acts.empty()) {
         // Default: ReLU for hidden layers, linear for output
@@ -262,8 +271,15 @@ void NeuralNetwork::load(const std::string& filename) {
         size_t input_size, output_size;
         file.read(reinterpret_cast<char*>(&input_size), sizeof(input_size));
         file.read(reinterpret_cast<char*>(&output_size), sizeof(output_size));
-        
+        printf("input size %d layer input size %d\n",
+	       input_size,
+	       layer->getInputSize());
         assert(input_size == layer->getInputSize());
+	if (output_size != layer->getOutputSize()){
+	  printf("Error output size mis-match: output size %d layer output size %d\n",
+		 output_size,
+		 layer -> getOutputSize());
+	}
         assert(output_size == layer->getOutputSize());
         
         // Load weights
@@ -308,4 +324,41 @@ std::vector<Experience> ReplayBuffer::sample(size_t batch_size) {
     return batch;
 }
 
+
+  //copy
+  // Copy constructor
+NeuralNetwork::NeuralNetwork(const NeuralNetwork& other) {
+    // Recreate the network architecture
+    for (const auto& layer : other.layers_) {
+        layers_.emplace_back(std::make_unique<Layer>(
+            layer->getInputSize(), 
+            layer->getOutputSize(), 
+            ActivationType::RELU  // You might want to store activation type in Layer
+        ));
+    }
+    
+    // Copy weights and biases
+    copyWeightsFrom(other);
+}
+
+// Assignment operator
+NeuralNetwork& NeuralNetwork::operator=(const NeuralNetwork& other) {
+    if (this != &other) {
+        // Clear existing layers
+        layers_.clear();
+        
+        // Recreate the network architecture
+        for (const auto& layer : other.layers_) {
+            layers_.emplace_back(std::make_unique<Layer>(
+                layer->getInputSize(), 
+                layer->getOutputSize(), 
+                ActivationType::RELU  // You might want to store activation type in Layer
+            ));
+        }
+        
+        // Copy weights and biases
+        copyWeightsFrom(other);
+    }
+    return *this;
+}
 }  // namespace eco

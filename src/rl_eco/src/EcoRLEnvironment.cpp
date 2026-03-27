@@ -1,465 +1,666 @@
+#include "rl_eco/EcoTypes.h" 
 #include "rl_eco/EcoRLEnvironment.h"
-#include "rl_eco/EcoDesignManager.h"
-#include "rl_eco/EcoChangeSet.h"
-#include "utl/Logger.h"
-
-#include <sstream>
-#include <iostream>
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 
 namespace eco {
 
-
-std::vector<double> EcoState::toFeatureVectorEnhanced() const {
-    std::vector<double> features;
-    
-    // Basic features (normalized)
-    features.push_back(static_cast<double>(num_unimplemented_changes) / 100.0);
-    features.push_back(static_cast<double>(num_available_spare_cells) / 1000.0);
-    features.push_back(total_spare_cells_available / 1000.0);
-    features.push_back((current_timing_slack + 1.0) / 2.0);  // Normalize to [0,1]
-    features.push_back(total_wirelength / 10000000.0);
-    features.push_back(congestion_metric);
-    
-    // Change type encoding (one-hot, 10 dimensions)
-    std::vector<double> change_type_encoding(10, 0.0);
-    if (current_change_type == "gate_change") change_type_encoding[0] = 1.0;
-    else if (current_change_type == "net_change") change_type_encoding[1] = 1.0;
-    else if (current_change_type == "timing_fix") change_type_encoding[2] = 1.0;
-    else if (current_change_type == "port_change") change_type_encoding[3] = 1.0;
-    else change_type_encoding[9] = 1.0;  // Other/unknown
-    features.insert(features.end(), change_type_encoding.begin(), change_type_encoding.end());
-    
-    // Required cell type encoding (one-hot, 20 dimensions for common types)
-    std::vector<double> cell_type_encoding(20, 0.0);
-    if (!required_cell_type.empty() && !cell_type_list.empty()) {
-        auto it = std::find(cell_type_list.begin(), cell_type_list.end(), required_cell_type);
-        if (it != cell_type_list.end()) {
-            size_t idx = std::distance(cell_type_list.begin(), it);
-            if (idx < 20) cell_type_encoding[idx] = 1.0;
-        }
-    }
-    features.insert(features.end(), cell_type_encoding.begin(), cell_type_encoding.end());
-    
-    // Spare cells by type (normalized counts, 20 dimensions)
-    for (int i = 0; i < 20; ++i) {
-        if (i < spare_cells_by_type.size()) {
-            features.push_back(spare_cells_by_type[i] / 100.0);
-        } else {
-            features.push_back(0.0);
-        }
-    }
-    
-    // Distance features (5 nearest compatible spare cells)
-    for (int i = 0; i < 5; ++i) {
-        if (i < spare_cell_distances.size()) {
-            features.push_back(std::exp(-spare_cell_distances[i] / 1000.0));  // Exponential decay
-        } else {
-            features.push_back(0.0);
-        }
-    }
-    
-    // Compatibility score with nearest spare
-    features.push_back(distance_to_nearest_compatible > 0 ? 
-                      std::exp(-distance_to_nearest_compatible / 1000.0) : 0.0);
-    
-    // Change complexity
-    features.push_back(static_cast<double>(change_complexity) / 10.0);
-    
-    return features;
+  EcoRLEnvironment::~EcoRLEnvironment(){}
+  
+  EcoRLEnvironment::EcoRLEnvironment(std::shared_ptr<EcoDesignManager> manager, 
+                                   rsz::Resizer* resizer,
+                                   int num_critical_paths,
+                                   int max_moves_per_episode)
+    : design_manager_(manager)
+    , resizer_(resizer)
+    , num_critical_paths_(num_critical_paths)
+    , max_moves_per_episode_(max_moves_per_episode)
+    , current_move_(0)
+    , episode_active_(false) {
 }
 
-  
-// EcoState implementation
-std::vector<double> EcoState::toFeatureVector() const {
-    std::vector<double> features;
+void EcoRLEnvironment::reset() {
+    // Reset episode tracking
+    current_move_ = 0;
+    episode_active_ = true;
+    recent_improvements_.clear();
     
-    // Basic features
-    features.push_back(static_cast<double>(num_unimplemented_changes));
-    features.push_back(static_cast<double>(num_available_spare_cells));
-    features.push_back(current_timing_slack);
-    features.push_back(total_wirelength / 1000000.0);  // Normalize
-    features.push_back(congestion_metric);
+    // Initialize episode stats
+    current_stats_ = EpisodeStats();
+    current_stats_.initial_tns = design_manager_->evaluateTotalNegativeSlack();
+    current_stats_.tns_trajectory.push_back(current_stats_.initial_tns);
+
+    //reset the action / index look ups
+    action2index_.clear();
+    index2action_.clear();
+}
+
+DesignState EcoRLEnvironment::getCurrentState() {
+    DesignState state;
     
-    // Change type as one-hot encoding
-    std::vector<double> change_type_encoding(5, 0.0);
-    if (current_change_type == "gate_change") change_type_encoding[0] = 1.0;
-    else if (current_change_type == "net_change") change_type_encoding[1] = 1.0;
-    else if (current_change_type == "port_change") change_type_encoding[2] = 1.0;
-    else if (current_change_type == "timing_fix") change_type_encoding[3] = 1.0;
-    else change_type_encoding[4] = 1.0;
-    features.insert(features.end(), change_type_encoding.begin(), change_type_encoding.end());
+    // Get global metrics
+    state.tns = design_manager_->evaluateTotalNegativeSlack();
+    state.wns = design_manager_->evaluateWorstNegativeSlack();
+    state.total_area = design_manager_->evaluateDesignArea();
+    state.total_power = design_manager_->evaluateTotalPower();
     
-    features.push_back(static_cast<double>(change_complexity));
+    // Analyze critical paths
+    auto analysis = analyzeCriticalPaths();
     
-    // Add top 5 nearest spare cell distances (normalized)
-    for (int i = 0; i < 5; ++i) {
-        if (i < spare_cell_distances.size()) {
-            features.push_back(spare_cell_distances[i] / 1000.0);  // Normalize
-        } else {
-            features.push_back(0.0);
-        }
+    // Extract path-specific features
+    state.critical_path_slacks.reserve(num_critical_paths_);
+    state.path_cell_counts.reserve(num_critical_paths_);
+    
+    for (const auto& path : analysis.critical_paths) {
+        state.critical_path_slacks.push_back(path.slack);
+        state.path_cell_counts.push_back(path.instances.size());
     }
     
-    return features;
-}
-
-std::string EcoState::hash() const {
-    std::stringstream ss;
-    ss << num_unimplemented_changes << "_"
-       << num_available_spare_cells << "_"
-       << static_cast<int>(current_timing_slack * 100) << "_"
-       << current_change_type;
-    return ss.str();
-}
-
-// EcoAction implementation
-std::string EcoAction::toString() const {
-    switch (type) {
-        case USE_SPARE_CELL: return "USE_SPARE_CELL_" + std::to_string(spare_cell_index);
-        case REROUTE: return "REROUTE";
-        case BUFFER_INSERT: return "BUFFER_INSERT_" + std::to_string(buffer_size);
-        case RESIZE_GATE: return "RESIZE_GATE";
-        case SKIP_CHANGE: return "SKIP_CHANGE";
-        case NO_ACTION: return "NO_ACTION";
-        default: return "UNKNOWN";
+    // Pad if fewer paths than expected
+    while (state.critical_path_slacks.size() < num_critical_paths_) {
+        state.critical_path_slacks.push_back(0.0);
+        state.path_cell_counts.push_back(0.0);
     }
+    
+    // Extract spare utilization features
+    state.spare_cell_distances = extractSpareUtilization();
+    
+    // Move history
+    state.recent_improvements.assign(recent_improvements_.begin(), 
+                                   recent_improvements_.end());
+    // Pad to fixed size (e.g., last 5 moves)
+    while (state.recent_improvements.size() < 5) {
+        state.recent_improvements.push_back(0.0);
+    }
+    
+    state.moves_attempted = current_move_;
+    state.moves_accepted = current_stats_.moves_accepted;
+    
+    return state;
 }
 
-// EcoRLEnvironment implementation
-  EcoRLEnvironment::EcoRLEnvironment(std::shared_ptr<EcoDesignManager> manager,utl::Logger* logger)
-    : design_manager_(manager),
-      logger_(logger),
-      done_(false),
-      num_implemented_changes_(0) {
+  double EcoRLEnvironment::step(const std::shared_ptr<EcoAction> action) {
 
-  initialize();
-}
-  
-
-void  EcoRLEnvironment::initializeCellTypes(){
-  
-
-  auto cell_types = design_manager_->getAvailableSpareCellTypes();
-  // Convert set to vector for consistent ordering
-  discovered_cell_types_.assign(cell_types.begin(), cell_types.end());
-  std::sort(discovered_cell_types_.begin(), discovered_cell_types_.end());
-  std::map<std::string,int> cell_type_to_index;
-  
-  // Create mapping for fast lookup
-  for (size_t i = 0; i < discovered_cell_types_.size(); ++i) {
-    cell_type_to_index[discovered_cell_types_[i]] = i;
-  }
+    if (!episode_active_ || isEpisodeDone()) {
+        return 0.0;
+    }
     
-  // Get type distribution for logging
-  auto type_counts = design_manager_->getSpareCellTypeCount();
+    // Record current metrics
+    double prev_tns = design_manager_->evaluateTotalNegativeSlack();
+    double prev_wns = design_manager_->evaluateWorstNegativeSlack();
     
-  // Log discovered types with counts
-  logger_->info(utl::ECO, 200, "Discovered {} spare cell types:", discovered_cell_types_.size());
-  for (const auto& [type, count] : type_counts) {
-    logger_->info(utl::ECO, 201, "  {} : {} cells", type, count);
-  }
-}
-
-  void EcoRLEnvironment::initialize(){
-     if (design_manager_->getIdentifiedSpareCells().empty()) {
-            std::cerr << "Warning: No spare cells identified. Calling identifySpareCells()..." << std::endl;
-            design_manager_->identifySpareCells();
-        }
-        
-        // Initialize cell types from the identified spare cells
-        initializeCellTypes();
-        
-        // Validate we have required data
-        if (discovered_cell_types_.empty()) {
-            throw std::runtime_error("No spare cell types discovered. Cannot proceed with RL environment.");
-        }
-        
-        // Initialize other components
-        total_changes_ = design_manager_->getTotalChanges();
-        current_state_ = computeCurrentState();
-  }
-
-  
-
-EcoState EcoRLEnvironment::reset() {
-    design_manager_->reset();  // Reset to initial state
-    done_ = false;
-    num_implemented_changes_ = 0;
-    //reinitialize cell types
-    initializeCellTypes();
-    current_state_ = computeCurrentState();
-    return current_state_;
-}
-
-std::pair<EcoState, double> EcoRLEnvironment::step(const EcoAction& action) {
-
-  logger_->info(utl::ECO, 999, "Action taken: {} (index {})", 
-                  action.toString(), action.toIndex());
-    
-    EcoState prev_state = current_state_;
-    
-    // Execute action
-    bool success = executeAction(action);
-    (void)success;
-    
-    // Update state
-    current_state_ = computeCurrentState();
+    // Execute move with journaling
+    resizer_->journalBegin();
+    EcoDesignManager::MoveResult result = executeMove(action);
     
     // Calculate reward
-    double reward = calculateReward(prev_state, current_state_, action);
+    double reward = calculateReward(result, prev_tns, prev_wns);
     
-    // Check if done
-    done_ = design_manager_->allChangesProcessed() || 
-            !design_manager_->hasUnimplementedChanges();
-    
-    return {current_state_, reward};
-}
-
-bool EcoRLEnvironment::isDone() const {
-    return done_;
-}
-
-std::vector<EcoAction> EcoRLEnvironment::getValidActions(const EcoState& state) const {
-    std::vector<EcoAction> valid_actions;
-    
-    // Always can skip
-    valid_actions.push_back(EcoAction(EcoAction::SKIP_CHANGE));
-    
-    if (state.num_unimplemented_changes == 0) {
-        valid_actions.push_back(EcoAction(EcoAction::NO_ACTION));
-        return valid_actions;
+    // Decide whether to accept the move
+    bool should_accept = false;
+    if (result.success && result.timing_improvement > min_improvement_threshold_) {
+        should_accept = true;
+    } else if (result.success && reward > 0) {
+        // Accept small improvements if overall reward is positive
+        should_accept = true;
     }
     
-    // Check available spare cells
-    auto spare_cells = design_manager_->getAvailableSpareCells();
-    for (size_t i = 0; i < spare_cells.size(); i++){
-        valid_actions.push_back(EcoAction(EcoAction::USE_SPARE_CELL, i));
+    if (should_accept) {
+        acceptMove();
+        current_stats_.moves_accepted++;
+        recent_improvements_.push_back(result.timing_improvement);
+    } else {
+        rejectMove();
+        current_stats_.moves_rejected++;
+        recent_improvements_.push_back(0.0);
+        reward = -0.1;  // Small penalty for rejected move
     }
     
-    // Other actions based on change type
-    if (state.current_change_type == "net_change") {
-        valid_actions.push_back(EcoAction(EcoAction::REROUTE));
+    // Maintain sliding window
+    if (recent_improvements_.size() > 5) {
+        recent_improvements_.pop_front();
     }
     
-    if (state.current_timing_slack < 0) {
-        valid_actions.push_back(EcoAction(EcoAction::BUFFER_INSERT));
-        valid_actions.push_back(EcoAction(EcoAction::RESIZE_GATE));
-    }
-    
-    return valid_actions;
-}
-
-int EcoRLEnvironment::getStateSize() const {
-  EcoState dummy_state;
-  return dummy_state.toFeatureVectorEnhanced().size();
-}
-
-int EcoRLEnvironment::getActionSize() const {
-  // Fixed actions + number of spare cells
-  size_t num_spare_cells = design_manager_->getAvailableSpareCells().size();
-  num_spare_cells = std::min(num_spare_cells, MAX_SPARE_CELLS_FOR_RL);
-  return EcoAction::getFixedActionCount() + num_spare_cells;
-}
-
-double EcoRLEnvironment::calculateReward(const EcoState& prev_state,
-                                        const EcoState& curr_state,
-                                        const EcoAction& action) const {
-    double reward = 0.0;
-
-    //debug information
-    // Calculate components
-    bool change_implemented = curr_state.num_unimplemented_changes < prev_state.num_unimplemented_changes;
-    double timing_improvement = curr_state.current_timing_slack - prev_state.current_timing_slack;
-    double wirelength_increase = curr_state.total_wirelength - prev_state.total_wirelength;
-    
-    // Apply rewards/penalties
-    if (change_implemented) {
-        reward += CHANGE_IMPLEMENTED_REWARD;
-        logger_->info(utl::ECO, 995, "Change implemented! +{}", CHANGE_IMPLEMENTED_REWARD);
-    }
-    
-    if (timing_improvement > 0) {
-        double timing_reward = TIMING_IMPROVEMENT_REWARD * timing_improvement;
-        reward += timing_reward;
-        logger_->info(utl::ECO, 994, "Timing improved by {:.2f}! +{:.2f}", 
-                      timing_improvement, timing_reward);
-    }
-    
-    if (action.type == EcoAction::SKIP_CHANGE) {
-        reward += SKIP_PENALTY;
-        logger_->info(utl::ECO, 993, "Skipped change! {}", SKIP_PENALTY);
-    }
-    
-
-    
-    // Reward for implementing a change
-    if (curr_state.num_unimplemented_changes < prev_state.num_unimplemented_changes) {
-        reward += CHANGE_IMPLEMENTED_REWARD;
-        
-        // Bonus for timing improvement
-        if (curr_state.current_timing_slack > prev_state.current_timing_slack) {
-            reward += TIMING_IMPROVEMENT_REWARD * 
-                     (curr_state.current_timing_slack - prev_state.current_timing_slack);
-        }
-    }
-    
-    // Penalties
-    if (action.type == EcoAction::SKIP_CHANGE) {
-        reward += SKIP_PENALTY;
-    }
-    
-    // Wirelength penalty
-    wirelength_increase = curr_state.total_wirelength - prev_state.total_wirelength;
-    if (wirelength_increase > 0) {
-        reward += WIRELENGTH_PENALTY * wirelength_increase;
-    }
-    
-    // Congestion penalty
-    double congestion_increase = curr_state.congestion_metric - prev_state.congestion_metric;
-    if (congestion_increase > 0) {
-        reward += CONGESTION_PENALTY * congestion_increase;
-    }
-    
-    logger_->info(utl::ECO, 999, "Reward: action={}, reward={}, impl={}, skip={}",
-		  action.toString(), reward, 
-		  curr_state.num_unimplemented_changes < prev_state.num_unimplemented_changes,
-		  action.type == EcoAction::SKIP_CHANGE);
+    // Update episode tracking
+    current_move_++;
+    current_stats_.total_reward += reward;
+    current_stats_.tns_trajectory.push_back(
+        design_manager_->evaluateTotalNegativeSlack()
+    );
     
     return reward;
 }
 
-EcoState EcoRLEnvironment::computeCurrentState() const {
-    EcoState state;
+PathAnalysis EcoRLEnvironment::analyzeCriticalPaths() {
+    PathAnalysis analysis;
     
-    // Existing state computation...
-    state.num_unimplemented_changes = design_manager_->getNumUnimplementedChanges();
-    state.num_available_spare_cells = design_manager_->getNumAvailableSpareCells();
-    state.current_timing_slack = design_manager_->getWorstSlack();
-    state.total_wirelength = design_manager_->getTotalWirelength();
-    state.congestion_metric = design_manager_->getCongestionMetric();
+    // Get critical paths
+    analysis.critical_paths = design_manager_->getCriticalPaths(num_critical_paths_);
     
-    // NEW: Get spare cell type information
-    state.cell_type_list = discovered_cell_types_;
-    state.spare_cells_by_type.clear();
-    auto type_counts = design_manager_->getSpareCellTypeCount();
-    for (const auto& type : discovered_cell_types_) {
-        auto it = type_counts.find(type);
-        state.spare_cells_by_type.push_back(it != type_counts.end() ? it->second : 0);
-    }
-    state.total_spare_cells_available = design_manager_->getNumAvailableSpareCells();
-    
-    auto* current_change = design_manager_->getCurrentChange();
-    if (current_change) {
-        state.current_change_type = current_change->getType();
-        state.change_complexity = current_change->getComplexity();
+    // Build instance-to-paths mapping and criticality scores
+    for (int path_idx = 0; path_idx < analysis.critical_paths.size(); ++path_idx) {
+        const auto& path = analysis.critical_paths[path_idx];
+        double path_weight = std::exp(-path_idx * 0.1);  // Exponential decay
         
-        // NEW: Extract required cell type for gate changes
-        auto gate_change = dynamic_cast<EcoGateChange*>(current_change);
-        if (gate_change) {
-            auto inst_change = gate_change->getInstanceChange();
-            if (inst_change) {
-                state.required_cell_type = design_manager_->extractBaseType(
-                    inst_change->getInfo().cell_type);
-            }
+        for (const auto& inst : path.instances) {
+	  std::string inst_name = inst -> getName();
+            analysis.instance_to_paths[inst_name].push_back(path_idx);
+            analysis.instance_criticality[inst_name] += path_weight * std::abs(path.slack);
         }
-        
-        // Get distances to spare cells, prioritizing compatible ones
-        state.spare_cell_distances.clear();
-        state.distance_to_nearest_compatible = std::numeric_limits<double>::max();
-        
-        auto spare_cells = design_manager_->getAvailableSpareCells();
-        std::vector<std::pair<double, std::string>> distance_type_pairs;
-        
-        for (const auto& cell : spare_cells) {
-            double dist = design_manager_->getDistanceToChange(cell, current_change);
-            std::string base_type = design_manager_->extractBaseType(cell.type);
-            distance_type_pairs.push_back({dist, base_type});
-            
-            // Track nearest compatible
-            if (base_type == state.required_cell_type) {
-                state.distance_to_nearest_compatible = std::min(
-                    state.distance_to_nearest_compatible, dist);
-            }
-        }
-        
-        // Sort by distance
-        std::sort(distance_type_pairs.begin(), distance_type_pairs.end());
-        
-        // Store top distances
-        for (const auto& [dist, type] : distance_type_pairs) {
-            state.spare_cell_distances.push_back(dist);
-            state.spare_cell_types.push_back(type);
-            if (state.spare_cell_distances.size() >= 10) break;
-        }
-    } else {
-        state.current_change_type = "none";
-        state.change_complexity = 0;
-        state.distance_to_nearest_compatible = 0.0;
     }
     
-    return state;
+    return analysis;
 }
+
+
+  std::vector<size_t> EcoRLEnvironment::getValidActionIndices(const DesignState& state){
+    // Generate actual actions
+    getValidActions(state);
+    std::vector<size_t> valid_indices;
+    for (auto i2a: index2action_){
+      valid_indices.push_back(i2a.first);
+    }
+    return valid_indices;
+  }
+
+  std::shared_ptr<EcoAction> EcoRLEnvironment::getActionFromIndex(size_t index){
+    std::map<size_t,std::shared_ptr<EcoAction> >::iterator it;
+    it = index2action_.find(index); 
+    if (it != index2action_.end()){
+      return (*it).second;
+    }
+    return nullptr;
+  }
+
+  size_t EcoRLEnvironment::getIndexFromAction(const std::shared_ptr<EcoAction> action){
+    std::map<std::shared_ptr<EcoAction>,size_t >::iterator it;
+    it = action2index_.find(action);
+    if (it != action2index_.end()){
+      return (*it).second;
+    }
+    return MAX_ACTIONS;
+  }
+
+
+std::vector<std::shared_ptr<EcoAction> > EcoRLEnvironment::getValidActions(const DesignState& state) {
+    auto analysis = analyzeCriticalPaths();
+    std::vector<std::shared_ptr<EcoAction>> all_actions;
+    // Generate actions of each type
+    auto resize_actions = generateResizeActions(analysis);
+    auto rebuffer_actions = generateRebufferActions(analysis);
+    auto load_split_actions = generateLoadSplitActions(analysis);
+    auto retime_actions = generateRetimeActions(analysis);
+    auto pipeline_actions = generatePipelineActions(analysis);
+    auto logic_remap_actions = generateLogicRemapActions(analysis);
+    
+    // Combine all actions
+    all_actions.insert(all_actions.end(), resize_actions.begin(), resize_actions.end());
+    all_actions.insert(all_actions.end(), rebuffer_actions.begin(), rebuffer_actions.end());
+    all_actions.insert(all_actions.end(), load_split_actions.begin(), load_split_actions.end());
+    all_actions.insert(all_actions.end(), retime_actions.begin(), retime_actions.end());
+    all_actions.insert(all_actions.end(), pipeline_actions.begin(), pipeline_actions.end());
+    all_actions.insert(all_actions.end(), logic_remap_actions.begin(), logic_remap_actions.end());
+    
+    // Sort by predicted improvement
+    std::sort(all_actions.begin(), all_actions.end(),
+              [](const std::shared_ptr<EcoAction>& a, const std::shared_ptr<EcoAction>& b) {
+                  return a->predicted_improvement > b->predicted_improvement;
+              });
+    
+    // Limit total action space
+    if (all_actions.size() > 200) {
+        all_actions.resize(200);
+    }
+
+    //build the map of action to index
+    size_t index=0;
+    for (auto action: all_actions){
+      action2index_[action]=index;
+      index2action_[index]=action;
+      index++;
+    }
+
+    max_action_size_ = all_actions.size() > max_action_size_ ? all_actions.size():max_action_size_;
+    
+    return all_actions;
+}
+
+  
+std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateResizeActions(
+    const PathAnalysis& analysis) {
+    
+    std::vector<std::shared_ptr<EcoAction>> actions;
+    
+    // For each critical path
+    for (int path_idx = 0; path_idx < analysis.critical_paths.size(); ++path_idx) {
+        const auto& path = analysis.critical_paths[path_idx];
+	printf("Examining path\n");
+	for (int inst_idx = 0; inst_idx < path.instances.size(); ++inst_idx) {
+	  odb::dbInst* inst = path.instances[inst_idx];
+	  printf("%s -> ", inst -> getName().c_str());
+	}
+	printf("\n");
+	
+        // For each instance in the path
+        for (int inst_idx = 0; inst_idx < path.instances.size(); ++inst_idx) {
+            odb::dbInst* inst = path.instances[inst_idx];
+            std::string instance_name = inst->getName();
+            odb::dbMaster* current_master = inst->getMaster();
+            std::string current_master_name = current_master->getName();
+
+            // Find nearby spare cells first
+	    long long  max_radius = design_manager_ -> getMaxRadius(inst);
+
+	    std::vector<std::shared_ptr<SpareCell>> nearby_spares = findNearbySpares(inst, max_radius);
+
+	    //TODO change to set.
+	    std::vector<std::string> compatible_masters =
+	      design_manager_->getCompatibleMasters(current_master_name);
+	    
+	    for (auto spare_candidate: nearby_spares){
+	      odb::dbInst* spare_inst = spare_candidate -> instance;
+	      odb::dbMaster* spare_master = spare_candidate -> master;
+	      std::string spare_master_name = spare_master -> getName();
+
+	      //Is the candidate spare compatible with the master ?
+	      bool compatible = false;
+	      for (auto compatible_name: compatible_masters){
+		if (compatible_name == spare_master_name){
+		  compatible = true;
+		}
+	      }
+	      if (compatible == false){
+		continue;
+	      }
+	      
+	      bool is_downsize =design_manager_ -> getMasterArea(spare_master_name) <
+		design_manager_ -> getMasterArea(current_master_name);
+	      
+	      if (is_downsize){
+		continue;
+	      }
+	      //Try the swap. Swap instance for spare
+	      EcoDesignManager::MoveResult move_gain = 
+		design_manager_->previewResize(inst, spare_inst);
+	      
+	      // Only create action if there's predicted improvement
+                if (move_gain.timing_improvement > 0) {
+		  printf("Timing improvement of %f.10 for swapping instance %s (%s) with instance %s (%s)\n",
+			 move_gain.timing_improvement,
+			 inst -> getName().c_str(),
+			 inst -> getMaster()->getName().c_str(),
+			 spare_inst -> getName().c_str(),
+			 spare_inst -> getMaster() -> getName().c_str()
+			 );
+                    // Create EcoAction with ResizeAction
+                    auto action = std::make_shared<EcoAction>();
+                    action->type = EcoAction::ActionType::RESIZE;
+                    action->resize = std::make_unique<ResizeAction>();
+                    action->resize->instance_name = instance_name;
+                    action->resize->new_master = spare_master_name;
+                    action->resize->critical_path_index = path_idx;
+                    action->resize->instance_index_in_path = inst_idx;
+                    
+                    action->resize->spare_instance = spare_candidate -> instance -> getName(); 
+                    
+                    // Set metrics
+                    action->predicted_improvement = move_gain.timing_improvement;
+                    action->resize->predicted_improvement = action->predicted_improvement;
+                    action->affected_critical_paths = 1;
+                    action->confidence_score = 0.8;
+                    
+                    actions.push_back(action);
+                }
+	    }
+	      
+	    /*
+            // Get compatible masters for current cell from block
+            auto compatible_masters = design_manager_->getCompatibleMasters(current_master_name);
+	    
+            // For each compatible master, check if we have a matching spare.
+	    // that increases drive strength
+	    
+            for (const auto& new_master_name : compatible_masters) {
+	      //eg NOR2_X1, NOR2_X2
+	      
+	      if (new_master_name == current_master_name) {
+		continue;
+	      }
+
+	      printf("Candidate move %s -> %s \n",
+		     new_master_name.c_str(),
+		     current_master_name.c_str());
+	      
+	      // Check if this is a downsize (doesn't need spare)
+	      bool is_downsize = design_manager_->getMasterArea(new_master_name) <= 
+		design_manager_->getMasterArea(current_master_name);
+
+	      if (is_downsize){
+		printf("Skip downsize move, need to improve performance !\n");
+		continue;
+	      }
+		
+	      std::shared_ptr<SpareCell> available_spare=nullptr;
+	      // Find a spare cell that can implement this master		  
+	      //got through spares to find compatible spare candidates
+	      for (size_t i = 0; i < spare_masters.size(); ++i) {
+		if (spare_masters[i] == new_master_name || 
+		    design_manager_->areCompatibleMasters(spare_masters[i], new_master_name)) {
+		    printf("Found a compatible spare candidate with master name %s !\n",
+			   new_master_name.c_str()));
+		  available_spare = nearby_spares[i];
+		  break;
+		}
+
+	      
+                // Preview the resize to estimate improvement
+                EcoDesignManager::MoveResult move_gain = 
+                    design_manager_->previewResize(instance_name, new_master_name);
+                
+                // Only create action if there's predicted improvement
+                if (move_gain.timing_improvement > 0) {
+                    // Create EcoAction with ResizeAction
+                    auto action = std::make_shared<EcoAction>();
+                    action->type = EcoAction::ActionType::RESIZE;
+                    action->resize = std::make_unique<ResizeAction>();
+                    action->resize->instance_name = instance_name;
+                    action->resize->new_master = new_master_name;
+                    action->resize->critical_path_index = path_idx;
+                    action->resize->instance_index_in_path = inst_idx;
+                    
+                    action->resize->spare_instance = available_spare -> instance -> getName(); 
+                    
+                    // Set metrics
+                    action->predicted_improvement = move_gain.timing_improvement;
+                    action->resize->predicted_improvement = action->predicted_improvement;
+                    action->affected_critical_paths = 1;
+                    action->confidence_score = 0.8;
+                    
+                    actions.push_back(action);
+                }
+            }
+	    */
+        }
+    }
+    return actions;
+}
+
   
 
-bool EcoRLEnvironment::executeAction(const EcoAction& action) {
-    auto* current_change = design_manager_->getCurrentChange();
-    if (!current_change && action.type != EcoAction::NO_ACTION) {
-        return false;
-    }
+  
+  /*
+    Estimate the value of an action. Assume values of actions computed during action generation.
+  */
+double EcoRLEnvironment::estimateActionValue(const std::shared_ptr<EcoAction>& action, 
+                                            const PathAnalysis& analysis) {
+    double value = 0.0;
     
-    bool success = false;
-    
-    switch (action.type) {
-        case EcoAction::USE_SPARE_CELL: {
-            auto spare_cells = design_manager_->getAvailableSpareCells();
-            if (action.spare_cell_index < spare_cells.size()) {
-                success = design_manager_->implementChangeWithSpareCell(
-                    current_change, spare_cells[action.spare_cell_index]);
-                if (success) num_implemented_changes_++;
+    switch (action->type) {
+    case EcoAction::ActionType::RESIZE: {
+            if (action->resize) {
+	      value = action -> predicted_improvement;
+            break;
+        }
+    }        
+    case EcoAction::ActionType::REBUFFER: {
+            if (action->rebuffer) {
+                // TODO: Estimate rebuffer value based on net length, criticality, etc.
             }
             break;
         }
         
-        case EcoAction::REROUTE:
-            success = design_manager_->implementChangeWithReroute(current_change);
-            if (success) num_implemented_changes_++;
+        // TODO: Add estimation for other action types
+        
+        default:
             break;
-            
-        case EcoAction::BUFFER_INSERT:
-            success = design_manager_->insertBuffer(current_change, action.buffer_size);
-            if (success) num_implemented_changes_++;
-            break;
-            
-        case EcoAction::RESIZE_GATE:
-            success = design_manager_->resizeGate(current_change);
-            if (success) num_implemented_changes_++;
-            break;
-            
-        case EcoAction::SKIP_CHANGE:
-            design_manager_->skipChange(current_change);
-            success = true;
-            break;
-            
-        case EcoAction::NO_ACTION:
-            success = true;
-            break;
+    }
+    
+    return value;
+}
+
+  std::vector<std::shared_ptr<SpareCell> > EcoRLEnvironment::findNearbySpares(odb::dbInst* inst, long long radius) {
+    return design_manager_->findSpareCellsNear(inst, radius);
+}
+
+  
+//  
+// Placeholder implementations for other action generators
+//
+std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateRebufferActions(
+    const PathAnalysis& analysis) {
+    std::vector<std::shared_ptr<EcoAction>> actions;
+    // TODO: Implement rebuffer action generation
+    // Example structure:
+    // auto action = std::make_shared<EcoAction>();
+    // action->type = EcoAction::REBUFFER;
+    // action->rebuffer = std::make_unique<RebufferAction>();
+    // action->rebuffer->operation = RebufferAction::BufferOp::INSERT_BUFFER;
+    // ...
+    return actions;
+}
+ 
+std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateLoadSplitActions(
+    const PathAnalysis& analysis) {
+    std::vector<std::shared_ptr<EcoAction>> actions;
+    // TODO: Implement load split action generation
+    return actions;
+}
+ 
+std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateRetimeActions(
+    const PathAnalysis& analysis) {
+    std::vector<std::shared_ptr<EcoAction>> actions;
+    // TODO: Implement retime action generation
+    return actions;
+}
+ 
+std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generatePipelineActions(
+    const PathAnalysis& analysis) {
+    std::vector<std::shared_ptr<EcoAction>> actions;
+    // TODO: Implement pipeline action generation
+    return actions;
+}
+ 
+std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateLogicRemapActions(
+    const PathAnalysis& analysis) {
+    std::vector<std::shared_ptr<EcoAction>> actions;
+    // TODO: Implement logic remap action generation
+    return actions;
+}
+
+
+  
+  double EcoRLEnvironment::calculateReward(const EcoDesignManager::MoveResult& result,
+                                        double prev_tns,
+                                        double prev_wns) {
+    if (!result.success) {
+        return -1.0;  // Penalty for invalid moves
+    }
+    
+    // Timing improvement component (primary objective)
+    double timing_reward = 0.0;
+    if (result.timing_improvement > 0) {
+        // Reward proportional to improvement, with diminishing returns
+        timing_reward = std::log1p(result.timing_improvement / 10.0);  // 10ps scale
+    } else {
+        // Heavier penalty for timing degradation  
+        timing_reward = result.timing_improvement / 5.0;
+    }
+    
+    // TNS improvement component
+    double current_tns = design_manager_->evaluateTotalNegativeSlack();
+    double tns_improvement = prev_tns - current_tns;
+    double tns_reward = tns_improvement / 100.0;  // Normalize by 100ps
+    
+    // Area penalty (minimize area increase)
+    double area_penalty = 0.0;
+    if (result.area_delta > 0) {
+        area_penalty = -0.1 * (result.area_delta / 1000.0);  // per 1000 sq units
+    }
+
+    //TODO
+    double power_penalty = 0.0;
+    /*
+    // Power penalty
+
+    if (result.power_delta > 0) {
+        power_penalty = -0.05 * (result.power_delta / 0.001);  // per mW
+    }
+    */
+    // Combine components with weights
+    double total_reward = 
+        0.6 * timing_reward +
+        0.3 * tns_reward +
+        0.05 * area_penalty +
+        0.05 * power_penalty;
+    
+    // Bonus for fixing critical paths
+    if (current_tns < prev_tns * 0.9) {  // 10% improvement
+        total_reward += 0.5;
+    }
+    
+    return total_reward;
+}
+
+
+  EcoDesignManager::MoveResult EcoRLEnvironment::executeMove(const std::shared_ptr<EcoAction> action) {
+    EcoDesignManager::MoveResult default_error;
+    switch (action -> type){
+    case EcoAction::ActionType::RESIZE:
+      {
+	std::string original_instance_name = action -> resize -> instance_name;
+	std::string spare_instance_name = action -> resize -> spare_instance;
+	odb::dbInst* original_instance = design_manager_ -> findInst(original_instance_name);
+	odb::dbInst* new_instance = design_manager_ -> findInst(spare_instance_name);
+	return design_manager_->performInstanceSwap(original_instance,
+						new_instance);
+      }
+      break;
     default:
-            success = true;
-            break;
+      break;
     }
-    
-    if (success) {
-        updateMetrics();
-    }
-    
-    return success;
+    return default_error;
+  }
+  
+
+void EcoRLEnvironment::acceptMove() {
+    resizer_->journalEnd();
 }
 
-void EcoRLEnvironment::updateMetrics() {
-    design_manager_->updateTimingMetrics();
-    design_manager_->updatePhysicalMetrics();
+void EcoRLEnvironment::rejectMove() {
+    resizer_->journalRestore();
+    resizer_->journalEnd();
 }
 
+bool EcoRLEnvironment::isEpisodeDone() const {
+    // Episode ends when:
+    // 1. Maximum moves reached
+    if (current_move_ >= max_moves_per_episode_) return true;
+    
+    // 2. TNS is close to zero (problem solved)
+    if (std::abs(design_manager_->evaluateTotalNegativeSlack()) < 1.0) return true;
+    
+    // 3. No improvement in last N moves
+    if (recent_improvements_.size() >= 5) {
+        double sum = std::accumulate(recent_improvements_.begin(), 
+                                   recent_improvements_.end(), 0.0);
+        if (sum < 0.1) return true;  // Less than 0.1ps improvement in 5 moves
+    }
+    
+    return false;
+}
+
+std::vector<double> EcoRLEnvironment::extractSpareUtilization() {
+    // This would analyze spare cell availability and distribution
+    // Simplified version:
+    std::vector<double> features;
+    
+    auto spare_info = design_manager_->getSpareGateSummary();
+    features.push_back(spare_info.total_count);
+    features.push_back(spare_info.buffers);
+    features.push_back(spare_info.inverters);
+    features.push_back(spare_info.logic_gates);
+    
+    return features;
+}
+
+  size_t EcoRLEnvironment::getActionSize(){
+    return index2action_.size();
+  }
+
+  size_t EcoRLEnvironment::getStateSize(){
+    size_t ret = 4; //tns + wns + total_area + total_power
+    ret += num_critical_paths_*2; //slacks + cell_counts
+    auto spare_info = design_manager_->getSpareGateSummary();
+    ret += spare_info.total_count; //the number of spare cells
+    return ret;
+  }
+
+  
+  std::vector<double> DesignState::toVector() const {
+    std::vector<double> vec;
+    printf("+++++++++++\n");
+    printf("Features:\n");
+    printf("Global Metrics tns %.10f wns %.10f area %.10f power %.10f \n",
+	   tns,
+	   wns,
+	   total_area,
+	   total_power);
+
+    // Global metrics (4)
+    vec.push_back(tns);
+    vec.push_back(wns);
+    vec.push_back(total_area);
+    vec.push_back(total_power);
+    
+    // Path features (24)
+    vec.insert(vec.end(), critical_path_slacks.begin(), critical_path_slacks.end());
+    vec.insert(vec.end(), path_cell_counts.begin(), path_cell_counts.end());
+    vec.insert(vec.end(), spare_cell_distances.begin(), spare_cell_distances.end());
+
+    printf("Path features\n");
+    printf("Number of critical path slacks %d\n", critical_path_slacks.size());
+    printf("Number of path cell counts %d\n", path_cell_counts.size());
+    printf("Spare cell distances %d\n", spare_cell_distances.size());
+    
+    /*
+      TODO:
+      Additional features for different move types
+      // Additional features for different move types
+      vec.insert(vec.end(), high_fanout_net_caps.begin(), high_fanout_net_caps.end());
+      vec.insert(vec.end(), register_slack_margins.begin(), register_slack_margins.end());
+      vec.insert(vec.end(), logic_depth_per_path.begin(), logic_depth_per_path.end());
+      vec.insert(vec.end(), pipeline_candidates.begin(), pipeline_candidates.end());
+     */
+    // History features
+
+    printf("Recent improvements (%d):\n",recent_improvements.size());
+    for (auto imp: recent_improvements){
+      printf("Recent improvements %f\n", imp);
+    }
+    
+    vec.insert(vec.end(), recent_improvements.begin(), recent_improvements.end());
+    printf("History features\n");
+    printf("Moves attempted %f Moves accepted %f\n",
+	   moves_attempted,
+	   moves_accepted);
+	   
+    vec.push_back(static_cast<double>(moves_attempted));
+    vec.push_back(static_cast<double>(moves_accepted));
+
+    printf("State Feature size : %d\n",vec.size());
+    printf("--------------\n");    
+    return vec;
+}
+
+  std::string EcoAction::toString(){
+    switch (type) {
+    case EcoAction::ActionType::RESIZE:
+      return std::string("Resize");
+    default:
+      return std::string("Unsupported");
+    }
+  }
+
+  
 } // namespace eco
