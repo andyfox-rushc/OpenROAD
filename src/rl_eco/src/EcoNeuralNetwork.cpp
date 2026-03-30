@@ -42,14 +42,18 @@ void Layer::initializeWeights(double scale) {
   
 
 std::vector<double> Layer::forward(const std::vector<double>& input) {
-  if (input.size() != input_size_){
-    printf("Cannot forward propagate, input size mis-match\n");
-  }
-    assert(input.size() == input_size_);
-    last_input_ = input;
-    
     std::vector<double> output(output_size_, 0.0);
-    printf("*Output size %d\n", output_size_);
+
+    if (input.size() != input_size_){
+      printf("Forward, Mismatch of input size received %d to that specificed %d \n",
+	     input.size(),
+	     input_size_);
+    }
+    
+    assert(input.size() == input_size_);
+
+
+    last_input_ = input;
     
     // Compute linear transformation
     for (size_t i = 0; i < output_size_; ++i) {
@@ -58,7 +62,6 @@ std::vector<double> Layer::forward(const std::vector<double>& input) {
         }
         output[i] += biases_[i];
     }
-    
     last_output_ = output;
     last_activated_ = activate(output);
     return last_activated_;
@@ -147,10 +150,11 @@ std::vector<double> Layer::activateDerivative(const std::vector<double>& x) {
 NeuralNetwork::NeuralNetwork(const std::vector<size_t>& layer_sizes,
                            const std::vector<ActivationType>& activations) {
     assert(layer_sizes.size() >= 2);
-
-    int ix=0;
-    for (auto s: layer_sizes){
-      printf("Layer %d Size %d\n", ix, s);
+    int ix = 0;
+    for (auto l: layer_sizes){
+      printf("Layer %d size %d \n",
+	     ix,
+	     l);
       ix++;
     }
     std::vector<ActivationType> acts = activations;
@@ -258,6 +262,7 @@ void NeuralNetwork::save(const std::string& filename) const {
 }
 
 void NeuralNetwork::load(const std::string& filename) {
+  printf("Load !\n");
     std::ifstream file(filename, std::ios::binary);
     if (!file.is_open()) {
         throw std::runtime_error("Cannot open file for loading: " + filename);
@@ -266,15 +271,26 @@ void NeuralNetwork::load(const std::string& filename) {
     size_t num_layers;
     file.read(reinterpret_cast<char*>(&num_layers), sizeof(num_layers));
     assert(num_layers == layers_.size());
+
+    size_t layer_count=0;
+    printf("reading in %d layers (num %d) \m", layers_.size(),num_layers);
     
     for (auto& layer : layers_) {
         size_t input_size, output_size;
         file.read(reinterpret_cast<char*>(&input_size), sizeof(input_size));
         file.read(reinterpret_cast<char*>(&output_size), sizeof(output_size));
-        printf("input size %d layer input size %d\n",
+
+	printf("Layer %d input size %d layer input size %d\n",
+	       layer_count,
 	       input_size,
 	       layer->getInputSize());
+	if (input_size != layer->getInputSize()){
+	  printf("Error input size mis-match: input size %d layer input size %d\n",
+		 input_size,
+		 layer -> getInputSize());
+	}	
         assert(input_size == layer->getInputSize());
+
 	if (output_size != layer->getOutputSize()){
 	  printf("Error output size mis-match: output size %d layer output size %d\n",
 		 output_size,
@@ -293,6 +309,7 @@ void NeuralNetwork::load(const std::string& filename) {
         std::vector<double> biases(output_size);
         file.read(reinterpret_cast<char*>(biases.data()), biases.size() * sizeof(double));
         layer->setBiases(biases);
+	layer_count++;
     }
 }
 

@@ -3,6 +3,7 @@
 
 #include <memory>
 #include <vector>
+#include <set>
 #include <stack>
 #include <unordered_map>
 #include <string>
@@ -140,7 +141,7 @@ public:
 							      odb::dbInst* instance,
 							      long long radius);
 
-  std::vector<std::string> getCompatibleMasters(const std::string& master_name) const;
+  std::set<std::string> getCompatibleMasters(const std::string& master_name) const;
   bool areCompatibleMasters(const std::string& spare_master, const std::string& inst_master) const;
   std::string extractBaseName(const std::string& master_name) const;
   bool arePinCompatible(const std::string& master1_name, const std::string& master_name) const;

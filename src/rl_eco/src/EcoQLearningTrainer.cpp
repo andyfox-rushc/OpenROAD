@@ -65,12 +65,8 @@ EcoQLearningTrainer::EcoQLearningTrainer(std::shared_ptr<EcoDesignManager> manag
     //Note that until we start training we don't have any actions
     //so we default the action size
     if (action_size == 0){
-      printf("Action size is zero ! defaulting to a maximum\n");
       action_size = config.default_action_size;
     }
-    printf("Making agent for state size %d and Action size %d\n",
-	   state_size,
-	   action_size);
     agent_ = std::make_unique<DQNAgent>(state_size, action_size, config);
 }
 
@@ -82,9 +78,9 @@ void EcoQLearningTrainer::train(size_t num_episodes) {
         agent_->decayEpsilon();
         
         // Print progress
-        if (episode % 10 == 0) {
+	//        if (episode % 10 == 0) {
             printTrainingProgress(episode);
-        }
+	    //        }
         
         // Save checkpoint
         if (episode % 100 == 0 && episode > 0) {
@@ -114,7 +110,6 @@ void EcoQLearningTrainer::train(size_t num_episodes) {
       // (populates environment action2index, index2action)
       //
       auto valid_actions_enum = env_->getValidActions(state);
-      printf("Number of valid actions %d\n", valid_actions_enum.size());
 
       logger_->info(utl::ECO, 998, "Inference Moves {}:  TNS {} WNS {}",
 		    steps,
@@ -123,9 +118,6 @@ void EcoQLearningTrainer::train(size_t num_episodes) {
 
       // Get Q-values for all actions (before selection)
 
-      printf("State features size =%d state_size = %d\n",
-	     state_features.size(),
-	     env_ -> getStateSize());
       if (state_features.size() < env_ -> getStateSize()){
 	for (size_t s = state_features.size();
 	     s != env_ -> getStateSize();
@@ -180,12 +172,26 @@ void EcoQLearningTrainer::train(size_t num_episodes) {
       }
       // Convert index back to action
       std::shared_ptr<EcoAction> action = env_ -> getActionFromIndex(action_index);
-        
-      // Take action
-      EcoDesignManager::MoveResult result = env_ -> executeMove(action);      
 
+      bool done=false;
+      // Take action
+      env_ -> resizer_->journalBegin();      
+      EcoDesignManager::MoveResult result = env_ -> executeMove(action);      
+      if (result.timing_improvement < 0.0){
+	printf("Things got worse ! for tns by %.10f \n", result.timing_improvement);	
+	env_ -> resizer_->journalRestore();
+	done=true;
+      }
+      else{
+	printf("Things getting better in tns by %.10f!\n",result.timing_improvement);
+      }
+      env_ -> resizer_ -> journalEnd();
+      
       auto next_state = env_ -> getCurrentState();
-      bool done = env_->isEpisodeDone();
+      if (env_ -> isEpisodeDone()){
+	done = true;
+      }
+      
       if (done){
 	printf("inference is done\n");
 	break;
@@ -207,7 +213,8 @@ void EcoQLearningTrainer::trainEpisode() {
   double episode_reward = 0.0;
   size_t steps = 0;
   std::vector<std::shared_ptr<EcoAction> > episode_actions;
-    
+  int zero_action_count=0;
+  
     while (steps < config_.max_steps_per_episode) {
         // Get current state as feature vector
       auto state_features = state.toVector();
@@ -216,10 +223,18 @@ void EcoQLearningTrainer::trainEpisode() {
       // Side effect is to construct means of indexing actions
       // (populates environment action2index, index2action)
       //
+      printf("Getting valid  actions \n");
       auto valid_actions_enum = env_->getValidActions(state);
-
       printf("Number of valid actions %d\n", valid_actions_enum.size());
-
+      if (valid_actions_enum.size() == 0){
+	if (zero_action_count >=2){
+	  return;
+	}
+	zero_action_count = zero_action_count+1;
+      }
+      else {
+	zero_action_count = 0;
+      }
       
       logger_->info(utl::ECO, 998, "Step {}: Moves attempted {}: Moves accepted {} TNS {} WNS {}",
 		    steps,

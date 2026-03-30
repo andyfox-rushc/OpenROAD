@@ -1,8 +1,12 @@
+#include "ord/OpenRoad.hh"
 #include "rl_eco/EcoTypes.h" 
 #include "rl_eco/EcoRLEnvironment.h"
 #include <algorithm>
 #include <cmath>
 #include <numeric>
+#include <chrono>
+#include <set>
+#include <map>
 
 namespace eco {
 
@@ -184,10 +188,21 @@ PathAnalysis EcoRLEnvironment::analyzeCriticalPaths() {
 
 
 std::vector<std::shared_ptr<EcoAction> > EcoRLEnvironment::getValidActions(const DesignState& state) {
-    auto analysis = analyzeCriticalPaths();
-    std::vector<std::shared_ptr<EcoAction>> all_actions;
-    // Generate actions of each type
-    auto resize_actions = generateResizeActions(analysis);
+
+  auto start = std::chrono::steady_clock::now();
+  auto analysis = analyzeCriticalPaths();
+  auto end = std::chrono::steady_clock::now();
+  std::chrono::duration<double,std::milli> duration = end-start;
+  printf("Time to analyze critical paths %.10f ms\n",duration);
+
+  std::vector<std::shared_ptr<EcoAction>> all_actions;
+  // Generate actions of each type
+  start = std::chrono::steady_clock::now();    
+  auto resize_actions = generateResizeActions(analysis);
+  end = std::chrono::steady_clock::now();
+  duration = end-start;
+  printf("Time to generate Resize Actions %.10f ms \n",duration);
+    
     auto rebuffer_actions = generateRebufferActions(analysis);
     auto load_split_actions = generateLoadSplitActions(analysis);
     auto retime_actions = generateRetimeActions(analysis);
@@ -231,16 +246,22 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateResizeActions(
     const PathAnalysis& analysis) {
     
     std::vector<std::shared_ptr<EcoAction>> actions;
+
+    std::map<std::string,std::set<std::string> > compatible_masters_set;
+    std::map<std::string,std::set<std::string> > ::iterator  compatible_masters_set_it;
+    std::set<std::string> compatible_masters;
     
     // For each critical path
     for (int path_idx = 0; path_idx < analysis.critical_paths.size(); ++path_idx) {
         const auto& path = analysis.critical_paths[path_idx];
-	printf("Examining path\n");
-	for (int inst_idx = 0; inst_idx < path.instances.size(); ++inst_idx) {
-	  odb::dbInst* inst = path.instances[inst_idx];
-	  printf("%s -> ", inst -> getName().c_str());
-	}
-	printf("\n");
+
+	//	sta::dbSta* sta = ord::OpenRoad::openRoad()->getSta();
+	//	printf("Examining path %d:  slack %s ns\n",path.index,delayAsString(path.slack,sta));
+	//	for (int inst_idx = 0; inst_idx < path.instances.size(); ++inst_idx) {
+	//	  odb::dbInst* inst = path.instances[inst_idx];
+	//	  printf("%s -> ", inst -> getName().c_str());
+	//	}
+	//	printf("\n");
 	
         // For each instance in the path
         for (int inst_idx = 0; inst_idx < path.instances.size(); ++inst_idx) {
@@ -248,51 +269,69 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateResizeActions(
             std::string instance_name = inst->getName();
             odb::dbMaster* current_master = inst->getMaster();
             std::string current_master_name = current_master->getName();
-
+	    double current_instance_area = design_manager_ -> getMasterArea(current_master_name);
             // Find nearby spare cells first
+	    
 	    long long  max_radius = design_manager_ -> getMaxRadius(inst);
-
+	    
 	    std::vector<std::shared_ptr<SpareCell>> nearby_spares = findNearbySpares(inst, max_radius);
 
-	    //TODO change to set.
-	    std::vector<std::string> compatible_masters =
-	      design_manager_->getCompatibleMasters(current_master_name);
+	    //	    printf("number of spares %d\n", nearby_spares.size());
 	    
+	    auto start = std::chrono::steady_clock::now();
+	    //change to set
+	    compatible_masters_set_it = compatible_masters_set.find(current_master_name);
+	    if (compatible_masters_set_it != compatible_masters_set.end()){
+	      compatible_masters = (*compatible_masters_set_it).second;
+	    }
+	    else{
+	      compatible_masters_set[current_master_name] =
+		design_manager_->getCompatibleMasters(current_master_name);
+	      compatible_masters =  compatible_masters_set[current_master_name];
+	    }
+	    
+	    auto end = std::chrono::steady_clock::now();
+	    std::chrono::duration<double,std::milli> duration = end-start;
+	    //	    printf("Time to get compatible masters %.10f ms\n",duration);
+
+
 	    for (auto spare_candidate: nearby_spares){
+
+
+	      
 	      odb::dbInst* spare_inst = spare_candidate -> instance;
 	      odb::dbMaster* spare_master = spare_candidate -> master;
 	      std::string spare_master_name = spare_master -> getName();
 
 	      //Is the candidate spare compatible with the master ?
 	      bool compatible = false;
-	      for (auto compatible_name: compatible_masters){
-		if (compatible_name == spare_master_name){
-		  compatible = true;
-		}
+	      if (compatible_masters.find(spare_master_name) !=
+		  compatible_masters.end()){
+		compatible = true;
 	      }
-	      if (compatible == false){
+	      else{
 		continue;
 	      }
 	      
 	      bool is_downsize =design_manager_ -> getMasterArea(spare_master_name) <
-		design_manager_ -> getMasterArea(current_master_name);
+		current_instance_area;
 	      
 	      if (is_downsize){
 		continue;
 	      }
+
+
+	      start = std::chrono::steady_clock::now();
 	      //Try the swap. Swap instance for spare
 	      EcoDesignManager::MoveResult move_gain = 
 		design_manager_->previewResize(inst, spare_inst);
-	      
+
+		auto end = std::chrono::steady_clock::now();
+		duration = end-start;
+		//		printf("Time to preview resize %.10f ms\n",duration);
+
 	      // Only create action if there's predicted improvement
                 if (move_gain.timing_improvement > 0) {
-		  printf("Timing improvement of %f.10 for swapping instance %s (%s) with instance %s (%s)\n",
-			 move_gain.timing_improvement,
-			 inst -> getName().c_str(),
-			 inst -> getMaster()->getName().c_str(),
-			 spare_inst -> getName().c_str(),
-			 spare_inst -> getMaster() -> getName().c_str()
-			 );
                     // Create EcoAction with ResizeAction
                     auto action = std::make_shared<EcoAction>();
                     action->type = EcoAction::ActionType::RESIZE;
@@ -313,74 +352,6 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateResizeActions(
                     actions.push_back(action);
                 }
 	    }
-	      
-	    /*
-            // Get compatible masters for current cell from block
-            auto compatible_masters = design_manager_->getCompatibleMasters(current_master_name);
-	    
-            // For each compatible master, check if we have a matching spare.
-	    // that increases drive strength
-	    
-            for (const auto& new_master_name : compatible_masters) {
-	      //eg NOR2_X1, NOR2_X2
-	      
-	      if (new_master_name == current_master_name) {
-		continue;
-	      }
-
-	      printf("Candidate move %s -> %s \n",
-		     new_master_name.c_str(),
-		     current_master_name.c_str());
-	      
-	      // Check if this is a downsize (doesn't need spare)
-	      bool is_downsize = design_manager_->getMasterArea(new_master_name) <= 
-		design_manager_->getMasterArea(current_master_name);
-
-	      if (is_downsize){
-		printf("Skip downsize move, need to improve performance !\n");
-		continue;
-	      }
-		
-	      std::shared_ptr<SpareCell> available_spare=nullptr;
-	      // Find a spare cell that can implement this master		  
-	      //got through spares to find compatible spare candidates
-	      for (size_t i = 0; i < spare_masters.size(); ++i) {
-		if (spare_masters[i] == new_master_name || 
-		    design_manager_->areCompatibleMasters(spare_masters[i], new_master_name)) {
-		    printf("Found a compatible spare candidate with master name %s !\n",
-			   new_master_name.c_str()));
-		  available_spare = nearby_spares[i];
-		  break;
-		}
-
-	      
-                // Preview the resize to estimate improvement
-                EcoDesignManager::MoveResult move_gain = 
-                    design_manager_->previewResize(instance_name, new_master_name);
-                
-                // Only create action if there's predicted improvement
-                if (move_gain.timing_improvement > 0) {
-                    // Create EcoAction with ResizeAction
-                    auto action = std::make_shared<EcoAction>();
-                    action->type = EcoAction::ActionType::RESIZE;
-                    action->resize = std::make_unique<ResizeAction>();
-                    action->resize->instance_name = instance_name;
-                    action->resize->new_master = new_master_name;
-                    action->resize->critical_path_index = path_idx;
-                    action->resize->instance_index_in_path = inst_idx;
-                    
-                    action->resize->spare_instance = available_spare -> instance -> getName(); 
-                    
-                    // Set metrics
-                    action->predicted_improvement = move_gain.timing_improvement;
-                    action->resize->predicted_improvement = action->predicted_improvement;
-                    action->affected_critical_paths = 1;
-                    action->confidence_score = 0.8;
-                    
-                    actions.push_back(action);
-                }
-            }
-	    */
         }
     }
     return actions;

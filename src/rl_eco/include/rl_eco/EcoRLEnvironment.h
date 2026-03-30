@@ -313,7 +313,7 @@ public:
 
   EcoDesignManager::MoveResult executeMove(const std::shared_ptr<EcoAction> action);  
   size_t max_action_size(){return max_action_size_;}
-  
+
 private:
     // Core components
   std::shared_ptr<EcoDesignManager> design_manager_;
@@ -361,7 +361,8 @@ private:
 
   std::map<size_t,std::shared_ptr<EcoAction> > index2action_;
   std::map<std::shared_ptr<EcoAction>,size_t > action2index_;
-  
+
+  friend class EcoQLearningTrainer; //to access resizer
 };
 
 } // namespace eco

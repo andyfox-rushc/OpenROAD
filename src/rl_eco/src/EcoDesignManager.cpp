@@ -137,10 +137,10 @@ bool EcoDesignManager::isSpareCell(dbInst* inst) const {
 }
 
   
-std::vector<std::string> EcoDesignManager::getCompatibleMasters(
+std::set<std::string> EcoDesignManager::getCompatibleMasters(
     const std::string& master_name) const {
     
-    std::vector<std::string> compatible_masters;
+    std::set<std::string> compatible_masters;
     
     // Extract the base cell type (remove drive strength suffix)
     std::string base_name = extractBaseName(master_name);
@@ -161,7 +161,7 @@ std::vector<std::string> EcoDesignManager::getCompatibleMasters(
         if (extractBaseName(candidate_name) == base_name) {
             // Verify same number of pins and pin compatibility
             if (arePinCompatible(master_name, candidate_name)) {
-                compatible_masters.push_back(candidate_name);
+                compatible_masters.insert(candidate_name);
             }
         }
     }
@@ -331,22 +331,20 @@ SpareGateSummary EcoDesignManager::getSpareGateSummary() const {
 std::vector<std::shared_ptr<SpareCell> > EcoDesignManager::findSpareCellsNear(
     dbInst* instance, long long radius_squared_in) {
 
-  long long radius_squared = radius_squared_in / 2;
+  //restrict search to nearby cells.
+  long long radius_squared = radius_squared_in / 16;
   
     std::vector<std::shared_ptr<SpareCell>> nearby_spares;
     
     if (!instance) {
-        return nearby_spares;
+      printf("Bug -- given null instane !\n");
+      exit(0);
+      return nearby_spares;
     }
     
     // Get instance location (center point)
     int inst_x, inst_y;
     instance->getLocation(inst_x, inst_y);
-
-    logger_->info(utl::ECO, 100, "Instance {} at x {} y {}",
-		  instance -> getName(),
-		  inst_x,
-		  inst_y);
     
     // Get instance bounding box to find center
     odb::dbBox* bbox = instance->getBBox();
@@ -355,6 +353,11 @@ std::vector<std::shared_ptr<SpareCell> > EcoDesignManager::findSpareCellsNear(
         inst_y = (bbox->yMin() + bbox->yMax()) / 2;
     }
     
+    //    logger_->info(utl::ECO, 100, "Find spare for Instance {} at x {} y {}",
+    //		  instance -> getName(),
+    //		  inst_x,
+    //		  inst_y);
+
     
     // Search through all spare cells
     // spare cells previously harvested.
@@ -391,6 +394,14 @@ std::vector<std::shared_ptr<SpareCell> > EcoDesignManager::findSpareCellsNear(
 
         if (dist_squared <= static_cast<long long>(radius_squared)) {
             nearby_spares.push_back(spare);
+	    /*
+	    logger_->info(utl::ECO, 100, "Candidate spare {} at dx {} dy {} from instance {}",
+			  spare -> instance -> getName(),
+			  dx,
+			  dy,
+			  instance -> getName()
+			  );
+	    */
         }
     }
     
@@ -422,7 +433,8 @@ std::vector<std::shared_ptr<SpareCell> > EcoDesignManager::findSpareCellsNear(
             
             return dist_a < dist_b;
         });
-    
+
+
     return nearby_spares;
 }
 
@@ -482,8 +494,10 @@ EcoDesignManager::MoveResult EcoDesignManager::calculateMoveImpact(
     double post_tns = evaluateTotalNegativeSlack();
     double post_area = evaluateDesignArea();
     double post_wire = evaluateTotalWireLength();
-    
-    result.timing_improvement = pre_tns - post_tns;  // Positive is good
+
+    result.timing_improvement = post_tns - pre_tns;  // Positive is good
+
+
     result.area_delta = post_area - pre_area;
     result.wire_length_delta = post_wire - pre_wire;
     result.success = true;
@@ -499,10 +513,6 @@ EcoDesignManager::MoveResult EcoDesignManager::calculateMoveImpact(
 							       odb::dbInst* inst,
 							       odb::dbInst* spare_inst
 					     ){
-    // Capture initial metrics
-    double initial_tns, initial_area, initial_wire;
-    capturePreMoveMetrics(initial_tns, initial_area, initial_wire);
-    
     // Use Resizer's journaling
     resizer_->journalBegin();
     
@@ -532,6 +542,7 @@ EcoDesignManager::MoveResult EcoDesignManager::calculateMoveImpact(
     double initial_tns, initial_area, initial_wire;
     capturePreMoveMetrics(initial_tns, initial_area, initial_wire);
 
+
     // Find the instance
     if (inst == nullptr) {
       return {false, 0.0, 0.0, 0.0, "Instance not found: " + inst-> getName()};
@@ -559,6 +570,7 @@ EcoDesignManager::MoveResult EcoDesignManager::calculateMoveImpact(
     
     // Calculate impact
     MoveResult result = calculateMoveImpact(initial_tns, initial_area, initial_wire);
+
     return result;
   }
   
@@ -752,7 +764,7 @@ std::vector<PathInfo> EcoDesignManager::getCriticalPaths(int path_count) {
     }
     
     // Update timing to ensure we have current data
-    sta_->updateTiming(false);
+    sta_->updateTiming(true);
     
     // Get worst paths from all path groups
     sta::PathEndSeq path_ends = sta_->findPathEnds(
@@ -791,7 +803,8 @@ std::vector<PathInfo> EcoDesignManager::getCriticalPaths(int path_count) {
         PathInfo info;
         info.slack = path_end->slack(sta_);
         info.index = path_index++;
-        
+
+
         // Skip paths with positive slack if we have enough critical ones
         if (info.slack > 0 && critical_paths.size() >= static_cast<size_t>(path_count / 2)) {
             continue;
@@ -1065,6 +1078,7 @@ double EcoDesignManager::evaluateTotalNegativeSlack() {
     // Use STA functionality to get TNS
     sta_->ensureGraph();
     sta_->searchPreamble();
+    sta_->updateTiming(false);    
     double tns = sta_->totalNegativeSlack(sta_->cmdCorner(), sta::MinMax::max());
     sta::Unit *unit = Sta::sta()->units()->timeUnit();
     double tns_out = unit -> staToUser(tns); 
@@ -1158,7 +1172,7 @@ EcoDesignManager::MoveResult EcoDesignManager::insertBuffer(
     }
     
     // Update timing
-    sta_->updateTiming(true);
+    sta_->updateTiming(false);
     
     // Calculate impact
     MoveResult result = calculateMoveImpact(initial_tns, initial_area, initial_wire);

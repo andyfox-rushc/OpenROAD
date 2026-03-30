@@ -22,6 +22,13 @@
 #include "sta/UnorderedSet.hh"
 #include "utl/Logger.h"
 
+namespace eco {
+  class EcoDesignManager;
+  class EcoRLEnvironment;
+  class EcoQLearningTrainer;
+}
+
+
 namespace grt {
 class GlobalRouter;
 }  // namespace grt
@@ -535,6 +542,7 @@ class Resizer : public dbStaState, public dbNetworkObserver
   // Library analysis data
   std::unique_ptr<LibraryAnalysisData> lib_data_;
 
+  
  protected:
   void init();
   double computeDesignArea();
@@ -938,6 +946,11 @@ class Resizer : public dbStaState, public dbNetworkObserver
   friend class ConcreteSwapArithModules;
   friend class Rebuffer;
   friend class OdbCallBack;
+
+  //let the eco infra structure have access to the resizer.
+  friend class eco::EcoDesignManager;
+  friend class eco::EcoRLEnvironment;
+  friend class eco::EcoQLearningTrainer;
 };
 
 }  // namespace rsz

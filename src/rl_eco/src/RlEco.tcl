@@ -273,3 +273,173 @@ proc write_routed_def {filename} {
   $eco writeRoutedDEF $filename
 }
 
+
+# Add these commands to RlEco.tcl
+
+# Initialize unified environment
+sta::define_cmd_args "eco_init_unified" {}
+
+proc eco_init_unified { args } {
+    sta::parse_key_args "eco_init_unified" args keys {} flags {}
+    
+    set eco [eco::getRlEco]
+    $eco initUnifiedEnvironment
+}
+
+# Set unified environment mode
+sta::define_cmd_args "eco_set_unified_mode" {mode}
+
+proc eco_set_unified_mode { args } {
+    sta::parse_key_args "eco_set_unified_mode" args keys {mode} flags {}
+    
+    set eco [eco::getRlEco]
+    $eco setUnifiedMode $keys(mode)
+}
+
+# Train unified environment
+sta::define_cmd_args "eco_train_unified" {
+    [-episodes episodes]
+    [-learning_rate learning_rate]
+    [-epsilon epsilon]
+    [-gamma gamma]
+}
+
+proc eco_train_unified { args } {
+    sta::parse_key_args "eco_train_unified" args \
+        keys {-episodes -learning_rate -epsilon -gamma} \
+        flags {}
+
+    set eco [eco::getRlEco]
+
+    # Set defaults
+    set episodes [expr {[info exists keys(-episodes)] ? $keys(-episodes) : 1000}]
+    set learning_rate [expr {[info exists keys(-learning_rate)] ? $keys(-learning_rate) : 0.001}]
+    set epsilon [expr {[info exists keys(-epsilon)] ? $keys(-epsilon) : 0.1}]
+    set gamma [expr {[info exists keys(-gamma)] ? $keys(-gamma) : 0.99}]
+
+    $eco trainUnified $episodes $learning_rate $epsilon $gamma
+}
+
+# Run generation phase
+sta::define_cmd_args "eco_run_generation" {}
+
+proc eco_run_generation { args } {
+    sta::parse_key_args "eco_run_generation" args keys {} flags {}
+    
+    set eco [eco::getRlEco]
+    $eco runUnifiedGeneration
+}
+
+# Run implementation phase
+sta::define_cmd_args "eco_run_implementation" {}
+
+proc eco_run_implementation { args } {
+    sta::parse_key_args "eco_run_implementation" args keys {} flags {}
+    
+    set eco [eco::getRlEco]
+    $eco runUnifiedImplementation
+}
+
+# Run complete unified flow
+sta::define_cmd_args "eco_run_unified" {}
+
+proc eco_run_unified { args } {
+    sta::parse_key_args "eco_run_unified" args keys {} flags {}
+    
+    set eco [eco::getRlEco]
+    $eco runUnifiedComplete
+}
+
+# Get current phase
+sta::define_cmd_args "eco_get_phase" {}
+
+proc eco_get_phase { args } {
+    sta::parse_key_args "eco_get_phase" args keys {} flags {}
+    
+    set eco [eco::getRlEco]
+    return [$eco getUnifiedPhase]
+}
+
+# Get unified state
+sta::define_cmd_args "eco_get_unified_state" {}
+
+proc eco_get_unified_state { args } {
+    sta::parse_key_args "eco_get_unified_state" args keys {} flags {}
+    
+    set eco [eco::getRlEco]
+    set state [$eco getUnifiedState]
+    
+    # Convert FloatVector to TCL list
+    set tcl_list {}
+    for {set i 0} {$i < [FloatVector_size $state]} {incr i} {
+        lappend tcl_list [FloatVector_get $state $i]
+    }
+    
+    return $tcl_list
+}
+
+# Get unified metrics
+sta::define_cmd_args "eco_get_unified_metrics" {}
+
+proc eco_get_unified_metrics { args } {
+    sta::parse_key_args "eco_get_unified_metrics" args keys {} flags {}
+    
+    set eco [eco::getRlEco]
+    set metrics [$eco getUnifiedMetrics]
+    
+    # Format metrics for display
+    puts "Unified ECO Metrics:"
+    puts "==================="
+    dict for {key value} $metrics {
+        puts [format "%-30s: %.2f" $key $value]
+    }
+    
+    return $metrics
+}
+
+# Example unified workflow command
+sta::define_cmd_args "eco_demo_unified" {}
+
+proc eco_demo_unified { args } {
+    puts "Running unified ECO flow demo..."
+    
+    # Initialize
+    eco_init
+    eco_init_unified
+    
+    # Load changes
+    eco_load_changes "test.eco"
+    eco_identify_spare
+    
+    # Set unified mode
+    eco_set_unified_mode "unified"
+    
+    # Train (small number for demo)
+    eco_train_unified -episodes 100 -learning_rate 0.001 -epsilon 0.1 -gamma 0.99
+    
+    # Run unified flow
+    eco_run_unified
+    
+    # Report results
+    eco_get_unified_metrics
+}
+
+
+
+sta::define_cmd_args "write_eco" {filename}
+
+proc write_eco { args } {
+    if { [llength $args] != 1 } {
+        utl::error ECO 2001 "write_eco requires exactly one argument: filename"
+    }
+    
+    set filename [lindex $args 0]
+    
+    set eco [eco::getRlEco]
+    if {![$eco writeGeneratedEco $filename]} {
+        utl::error ECO 2002 "Failed to write ECO file"
+    }
+}
+
+
+

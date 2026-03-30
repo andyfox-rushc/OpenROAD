@@ -1,9 +1,9 @@
 // EcoEnvironment.cpp (simplified implementation)
-#include "EcoEnvironment.h"
+#include "rl_eco/EcoEnvironment.h"
 
 #include "odb/lefout.h"  // For writing DEF if needed
 
-namespace rl_eco {
+namespace eco {
 
 EcoEnvironment::EcoEnvironment(const EnvironmentConfig& config)
     : current_step_(0), max_steps_(config.max_steps)

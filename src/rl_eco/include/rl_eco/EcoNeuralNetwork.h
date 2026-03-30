@@ -65,7 +65,7 @@ private:
 class NeuralNetwork {
 public:
     NeuralNetwork(const std::vector<size_t>& layer_sizes,
-                  const std::vector<ActivationType>& activations = {});
+                  const std::vector<ActivationType>& activations = { } );
 
   // Copy constructor - deep copy the layers
     NeuralNetwork(const NeuralNetwork& other);

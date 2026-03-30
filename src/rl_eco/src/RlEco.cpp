@@ -128,7 +128,8 @@ void RlEco::trainAgent(int episodes,
   config.batch_size = batch_size_;
   config.replay_buffer_size = replay_buffer_size_;
   config.max_episodes = episodes;
-  config.default_action_size = 500;
+  config.default_action_size = 500; //default action size
+  
   // Set reward weights
   config.timing_weight = timing_weight_;
   config.wirelength_weight = wirelength_weight_;

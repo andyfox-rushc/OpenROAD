@@ -16,10 +16,12 @@ OpenRoad* getOpenRoad();
 // Include std::vector support for setHiddenLayers
 %include "std_vector.i"
 %template(IntVector) std::vector<int>;
+%template(FloatVector) std::vector<float>;
 
 // Include the main header. Swig will generate
 // tcl for every public member.
 %include "rl_eco/RlEco.h"
+
 
 // Tell SWIG about the getter function
 namespace ord {
@@ -31,4 +33,6 @@ namespace ord {
     printf("Extended self init with open road\n");
     self->init(openroad);
  }
+
+  
 }

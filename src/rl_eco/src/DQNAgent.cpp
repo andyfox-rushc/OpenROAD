@@ -24,10 +24,14 @@ DQNAgent::DQNAgent(size_t state_size, size_t action_size, const QLearningConfig&
        {
     
     // Build network architecture
+	 printf("DQNAgent layers:\n");
     std::vector<size_t> layer_sizes;
     layer_sizes.push_back(state_size);
+    int ix=0;
     for (size_t hidden_size : config.hidden_layers) {
-        layer_sizes.push_back(hidden_size);
+      printf("DQNAgent Layer %d size %d\n",ix, hidden_size);
+      layer_sizes.push_back(hidden_size);
+      ix++;
     }
     printf("Building last layer of size %d\n",action_size);
     layer_sizes.push_back(action_size);
@@ -146,8 +150,14 @@ void DQNAgent::copyNetworkWeights(NeuralNetwork* from, NeuralNetwork* to) {
     // For now, we'll save and load through files (not efficient but works)
     const std::string temp_file = ".temp_network_weights.bin";
     from->save(temp_file);
-    to->load(temp_file);
+    //    to->load(temp_file);
     std::remove(temp_file.c_str());
+
+    size_t num_layers_from = from -> getNumLayers();
+    size_t num_layers_to = to -> getNumLayers();
+    assert(num_layers_from == num_layers_to);
+
+    to -> copyWeightsFrom(*from);
 }
 
 std::vector<double> DQNAgent::computeQValues(const std::vector<double>& state) {
