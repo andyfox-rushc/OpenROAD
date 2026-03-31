@@ -90,10 +90,9 @@
 #include "utl/Progress.h"
 #include "utl/ScopedTemporaryFile.h"
 #include "utl/decode.h"
-
 //access to eco stuff
 #include "rl_eco/MakeRlEco.h"
-#include "rl_eco/RlEco.h"
+
 
 
 namespace ord {
@@ -294,10 +293,7 @@ void OpenRoad::init(Tcl_Interp* tcl_interp,
   stt::initSteinerTreeBuilder(tcl_interp);
   dft::initDft(tcl_interp);
   est::initTcl(tcl_interp);
-
-  printf("Initializing eco\n");
-  ord::initRlEco(this);
-  printf("Eco is initialized\n");
+  initRlEco(this);
   
   // Import exported commands to global namespace.
   Tcl_Eval(tcl_interp, "sta::define_sta_cmds");
