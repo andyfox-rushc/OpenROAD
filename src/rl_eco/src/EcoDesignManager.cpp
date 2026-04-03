@@ -238,6 +238,19 @@ std::string EcoDesignManager::getSpareType(dbMaster* master) const {
     }
 }
 
+  void EcoDesignManager::populateSpareCellsDictionary(SpareCellsDictionary& spare_cells_dictionary){
+  }
+  
+  bool EcoDesignManager::isFeasibleMaster(const std::string& name, SpareCellsDictionary& spare_cells_dictionary){
+    printf("Todo !\n");
+    return false;
+  }
+
+  void EcoDesignManager::markUsed(const std::string& name, SpareCellsDictionary& spare_cells_dictionary){
+    printf("Todo !\n");
+  }
+
+  
   std::vector<std::shared_ptr<SpareCell> > EcoDesignManager::getAvailableSpares(
     const std::string& type) const {
     std::vector<std::shared_ptr<SpareCell> > available;
@@ -337,8 +350,6 @@ std::vector<std::shared_ptr<SpareCell> > EcoDesignManager::findSpareCellsNear(
     std::vector<std::shared_ptr<SpareCell>> nearby_spares;
     
     if (!instance) {
-      printf("Bug -- given null instane !\n");
-      exit(0);
       return nearby_spares;
     }
     
@@ -487,13 +498,23 @@ void EcoDesignManager::capturePreMoveMetrics(double& tns, double& area, double& 
 }
 
 
+  double EcoDesignManager::deltaRemovedWires(){
+    return removed_wire_cached_;
+  }
+
+  double EcoDesignManager::deltaAddedWires(){
+    return added_wire_cached_;    
+  }
+
+  
 EcoDesignManager::MoveResult EcoDesignManager::calculateMoveImpact(
     double pre_tns, double pre_area, double pre_wire) {
     
     MoveResult result;
     double post_tns = evaluateTotalNegativeSlack();
     double post_area = evaluateDesignArea();
-    double post_wire = evaluateTotalWireLength();
+    double post_wire = evaluateTotalWireLength() - deltaRemovedWires() +
+      deltaAddedWires();
 
     result.timing_improvement = post_tns - pre_tns;  // Positive is good
 
@@ -514,22 +535,37 @@ EcoDesignManager::MoveResult EcoDesignManager::calculateMoveImpact(
 							       odb::dbInst* spare_inst
 					     ){
     // Use Resizer's journaling
+    auto journal_start = std::chrono::steady_clock::now();    
     resizer_->journalBegin();
+    auto journal_end = std::chrono::steady_clock::now();
+    auto journal_duration = journal_end - journal_start;
     
-    // Perform the resize
+    auto start = std::chrono::steady_clock::now();
+
+
+    
     MoveResult result = performInstanceSwap(inst, spare_inst);
+
     
+    auto end = std::chrono::steady_clock::now();
+    std::chrono::duration<double,std::milli> duration = end-start;
+    //    printf("Time to perform instance swap %.10f ms\n",duration.count());    
     // Restore original state
+    auto journal_start1 = std::chrono::steady_clock::now();        
     resizer_->journalRestore();
-    
+    auto journal_end1 = std::chrono::steady_clock::now();
+    auto journal_duration1 = journal_end1 - journal_start1;
+    std::chrono::duration<double,std::milli> journal_total= journal_duration1 + journal_duration;
+    //    printf("Time for journalling move %.10f ms\n",journal_total.count());
     // Result contains timing_improvement without permanent changes
     return result;
   }
 
   
   EcoDesignManager::MoveResult EcoDesignManager::performInstanceSwap(
-							     odb::dbInst* inst,
-							     odb::dbInst* spare_inst){
+								     odb::dbInst* inst,
+								     odb::dbInst* spare_inst){
+
 
     /*    printf("Swapping Instance %s (cell %s)  with spare instance %s (cell %s)\n",
 	   inst -> getName().c_str(),
@@ -551,26 +587,60 @@ EcoDesignManager::MoveResult EcoDesignManager::calculateMoveImpact(
       return {false, 0.0, 0.0, 0.0, "Instance not found: " + spare_inst-> getName()};
     }
 
+    auto rewire_start = std::chrono::steady_clock::now();    
     //disconnect the inst
-    std::map<std::string,odb::dbNet*> pin2net;
+    pin2net_.clear();
+
+    //record the lost wiring length
+    removed_wire_cached_ = 0.0;
     for (auto iterm: inst->getITerms()){
-      pin2net[iterm -> getMTerm() -> getName()] = iterm -> getNet();
+      dbNet* net = iterm -> getNet();
+      if (net){
+	dbWire* wire = net -> getWire();
+	if (wire){
+	  uint64_t wire_length_dbu = wire->getLength();
+	  double dbu_per_micron = block_->getDbUnitsPerMicron();
+	  removed_wire_cached_ += wire_length_dbu / dbu_per_micron;
+	}
+      }
+    }
+        
+    for (auto iterm: inst->getITerms()){
+      pin2net_[iterm -> getMTerm() -> getName()] = iterm -> getNet();
       iterm -> disconnect();
     }
+
     
+    added_wire_cached_ = 0.0;
     //connect up the spare inst
     for (auto iterm: spare_inst -> getITerms()){
-      odb::dbNet* cur_net = pin2net[iterm -> getMTerm() -> getName()];
+      odb::dbNet* cur_net = pin2net_[iterm -> getMTerm() -> getName()];
       assert(cur_net);
       iterm -> connect(cur_net);
+      dbWire* cur_wire = cur_net -> getWire();
+      if (cur_wire){
+	  uint64_t wire_length_dbu = cur_wire->getLength();
+	  double dbu_per_micron = block_->getDbUnitsPerMicron();
+	  added_wire_cached_ += wire_length_dbu / dbu_per_micron;
+      }
     }
-    
-    // Update timing
-    sta_->updateTiming(false);
+    auto rewire_end = std::chrono::steady_clock::now();
+    std::chrono::duration<double,std::milli> rewire_duration = rewire_end - rewire_start;
+    //    printf("Time to perform rewire %.10f ms\n",rewire_duration.count());    
+    // Update timing, incremental
+
+    auto update_timing_start = std::chrono::steady_clock::now();    
+    //    sta_->updateTiming(false);
+    auto update_timing_end = std::chrono::steady_clock::now();
+    std::chrono::duration<double,std::milli> update_timing_duration = update_timing_end - update_timing_start;
+    //    printf("Time to perform timing update %.10f ms\n",update_timing_duration.count());
     
     // Calculate impact
+    auto move_impact_start = std::chrono::steady_clock::now();        
     MoveResult result = calculateMoveImpact(initial_tns, initial_area, initial_wire);
-
+    auto move_impact_end = std::chrono::steady_clock::now();
+    std::chrono::duration<double,std::milli> move_impact_duration = move_impact_end - move_impact_start;
+    //    printf("Time to perform move_impact %.10f ms\n",move_impact_duration.count());
     return result;
   }
   
@@ -1076,9 +1146,9 @@ double EcoDesignManager::evaluateTimingSlack(const std::string& pin_name) {
 
 double EcoDesignManager::evaluateTotalNegativeSlack() {
     // Use STA functionality to get TNS
-    sta_->ensureGraph();
-    sta_->searchPreamble();
-    sta_->updateTiming(false);    
+  //    sta_->ensureGraph();
+  //    sta_->searchPreamble();
+    sta_->updateTiming(false);    //incremental
     double tns = sta_->totalNegativeSlack(sta_->cmdCorner(), sta::MinMax::max());
     sta::Unit *unit = Sta::sta()->units()->timeUnit();
     double tns_out = unit -> staToUser(tns); 
@@ -1098,17 +1168,26 @@ double EcoDesignManager::evaluateWorstNegativeSlack() {
 }
 
   double EcoDesignManager::evaluateTotalPower(){
-    printf("Evaluate total power todo!\n");
     return 0.1;
   }
   
 double EcoDesignManager::evaluateDesignArea() {
     // Use Resizer's area calculation
-    return resizer_->designArea();
+    auto area_start = std::chrono::steady_clock::now();      
+    double ret = resizer_->designArea();
+    auto area_end = std::chrono::steady_clock::now();
+    std::chrono::duration<double,std::milli> area_duration = area_end-area_start;
+    //    printf("Time to perform area calc %.10f ms\n",area_duration.count());
+    return ret;
 }
 
 double EcoDesignManager::evaluateTotalWireLength() {
+  auto wl_start = std::chrono::steady_clock::now();        
     double total_length = 0.0;
+
+    if (use_wire_length_cache_){
+      return wire_length_cached_;
+    }
     
     // Calculate actual wire length from routed nets
     for (dbNet* net : block_->getNets()) {
@@ -1120,7 +1199,11 @@ double EcoDesignManager::evaluateTotalWireLength() {
             total_length += wire_length_dbu / dbu_per_micron;
         }
     }
-    
+
+    auto wl_end = std::chrono::steady_clock::now();
+    std::chrono::duration<double,std::milli> wl_duration = wl_end-wl_start;
+    //    printf("Time to perform wire len calc %.10f ms\n",wl_duration.count());
+    wire_length_cached_ = total_length;
     return total_length;
 }
 

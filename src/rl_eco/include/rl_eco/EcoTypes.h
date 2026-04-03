@@ -14,6 +14,7 @@
 
 #include <string>
 #include <vector>
+#include <map>
 #include <memory>
 
 namespace eco {
@@ -24,6 +25,8 @@ namespace eco {
 // Spare cell tracking (not in standard OpenROAD)
 //
 
+
+  
   // Spare cell management
     struct SpareCell {
         odb::dbInst* instance;
@@ -147,4 +150,12 @@ inline odb::dbMaster* getCellMaster(odb::dbInst* inst) {
     return const_cast<sta::LibertyCell*>(db_network-> libertyCell(cell));
 }
 
+
+typedef std::map<std::string,
+		 std::vector<std::tuple <bool, std::shared_ptr<SpareCell> > >
+		 > SpareCellsDictionary;
+  
+    
+
+  
 } // namespace eco

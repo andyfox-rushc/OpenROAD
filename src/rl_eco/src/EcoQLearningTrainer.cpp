@@ -460,6 +460,13 @@ std::string EcoQLearningTrainer::generateTrainingReport() const {
     report << "\nBest Action Sequence (" << best_action_sequence_.size() << " actions):\n";
     for (size_t i = 0; i < best_action_sequence_.size(); ++i) {
       report << "  " << i + 1 << ". " << best_action_sequence_[i]->toString() << "\n";
+      if (best_action_sequence_[i]  -> type == eco::EcoAction::ActionType::RESIZE){
+	printf(" Instance %s  -> Instance %s (%s) Improvement %.10f\n",
+	       best_action_sequence_[i]  -> resize -> instance_name.c_str(),
+	       best_action_sequence_[i]  -> resize -> spare_instance.c_str(),
+	       best_action_sequence_[i]  -> resize -> new_master.c_str(),
+	       best_action_sequence_[i]  -> resize -> predicted_improvement);
+      }
     }
     
     return report.str();

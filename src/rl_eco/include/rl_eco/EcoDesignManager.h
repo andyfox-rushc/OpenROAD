@@ -4,6 +4,7 @@
 #include <memory>
 #include <vector>
 #include <set>
+#include <map>
 #include <stack>
 #include <unordered_map>
 #include <string>
@@ -82,11 +83,13 @@ public:
     // Main move operations
   //    MoveResult previewResize(const std::string& instance_name,
   //			     const std::string& new_master_name);
+
+  double deltaRemovedWires();
+  double deltaAddedWires();
+  
   MoveResult previewResize(odb::dbInst* inst,
 			   odb::dbInst* spare_inst);
 
-  //    MoveResult performResize(const std::string& instance_name, 
-  //                           const std::string& new_master_name);
 
   MoveResult performResize(odb::dbInst* inst,
 			   odb::dbInst* spare_inst);
@@ -95,6 +98,7 @@ public:
   
   MoveResult performInstanceSwap(odb::dbInst* inst,
 				 odb::dbInst* spare_inst);
+			
     
     // Stubbed move operations
     MoveResult performRebuffer(const std::string& net_name, 
@@ -170,7 +174,12 @@ public:
   double getMasterArea(const std::string& master_name);
   //get the logger
   utl::Logger* logger() {return logger_;}
-
+  
+  bool isFeasibleMaster(const std::string& name, SpareCellsDictionary& spare_cells_dictionary);
+  void markUsed(const std::string& name, SpareCellsDictionary& spare_cells_dictionary);
+  void populateSpareCellsDictionary(SpareCellsDictionary& spare_cells_dictionary);
+  void wireLengthCache(bool value){use_wire_length_cache_=value;}
+  
 private:
     // OpenROAD database handles
   odb::dbDatabase* db_;
@@ -180,6 +189,10 @@ private:
   grt::GlobalRouter* router_;
   rsz::Resizer* resizer_;
   utl::Logger* logger_;
+
+  //Keep track of nets that changed for area calc
+  std::map<std::string, odb::dbNet*> pin2net_;
+
   
   // Spare cell tracking
   std::vector<std::shared_ptr<SpareCell> > spare_cells_;
@@ -201,7 +214,11 @@ private:
                            std::vector<odb::dbInst*>& instances,
                            std::vector<odb::dbNet*>& nets);
 
-
+  bool use_wire_length_cache_=false;
+  double wire_length_cached_=0.0;
+  double removed_wire_cached_=0.0;
+  double added_wire_cached_=0.0;
+  
   
 };
 

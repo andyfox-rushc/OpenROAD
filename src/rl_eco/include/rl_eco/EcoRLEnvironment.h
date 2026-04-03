@@ -196,7 +196,7 @@ struct LogicRemapAction {
     int logic_levels_delta;         // Change in logic depth
     double area_delta_estimate;
 };
-
+  
 
 
 struct EcoAction {
@@ -258,6 +258,7 @@ struct DesignState {
 
   
 class EcoRLEnvironment {
+  const unsigned SHANNON_DEPTH=4;
 public:
   EcoRLEnvironment(std::shared_ptr<EcoDesignManager> manager, 
                      rsz::Resizer* resizer,
@@ -270,6 +271,12 @@ public:
     void reset();
     bool isEpisodeDone() const;
 
+  //Is this path shannon split feasible ?
+  bool IsShannonFeasible(const eco::PathInfo& path_info,
+			 odb::dbITerm* &start_iterm,
+			 odb::dbITerm* &end_iterm,
+			 unsigned N);
+  
   size_t state_size() {return state_size_;}
   void state_size(size_t s){state_size_ = s;}
   
@@ -292,6 +299,8 @@ public:
     
     // Specific action generators
   std::vector<std::shared_ptr<EcoAction> > generateResizeActions(const PathAnalysis& analysis);
+  std::vector<std::shared_ptr<EcoAction> > generateShannonActions(const PathAnalysis& analysis);
+  
   std::vector<std::shared_ptr<EcoAction> > generateRebufferActions(const PathAnalysis& analysis);
   std::vector<std::shared_ptr<EcoAction> > generateLoadSplitActions(const PathAnalysis& analysis);
   std::vector<std::shared_ptr<EcoAction> > generateRetimeActions(const PathAnalysis& analysis);
@@ -308,8 +317,9 @@ public:
         double total_reward;
         std::vector<double> tns_trajectory;
     };
-    
-    EpisodeStats getEpisodeStats() const { return current_stats_; }
+
+  
+  EpisodeStats getEpisodeStats() const { return current_stats_; }
 
   EcoDesignManager::MoveResult executeMove(const std::shared_ptr<EcoAction> action);  
   size_t max_action_size(){return max_action_size_;}
