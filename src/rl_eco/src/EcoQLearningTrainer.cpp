@@ -77,7 +77,7 @@ void EcoQLearningTrainer::train(size_t num_episodes) {
         // Decay epsilon
         agent_->decayEpsilon();
         
-        // Print progress
+        // Print progress after every episode for now
 	//        if (episode % 10 == 0) {
             printTrainingProgress(episode);
 	    //        }
@@ -264,10 +264,7 @@ void EcoQLearningTrainer::trainEpisode() {
 	     );
 
 
-      if (q_values.size() == 0){
-	printf("Why no q values ???\n");
-	exit(0);
-      }
+      assert (q_values.size() != 0);
       
       //debug
       logger_->info(utl::ECO, 999, "Q-values for valid actions:");
@@ -328,7 +325,6 @@ void EcoQLearningTrainer::trainEpisode() {
         episode_reward += reward;
         steps++;
         total_steps_++;
-
 
 	
         if (done) {

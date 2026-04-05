@@ -7,6 +7,9 @@
 #include <chrono>
 #include <set>
 #include <map>
+#include <string>
+#include <iostream>
+#include <sstream>
 
 namespace eco {
 
@@ -324,8 +327,6 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateResizeActions(
 	    
 	    std::vector<std::shared_ptr<SpareCell>> nearby_spares = findNearbySpares(inst, max_radius);
 
-	    printf("number of spares to explore: %d\n", nearby_spares.size());
-	    
 	    auto start = std::chrono::steady_clock::now();
 	    //change to set
 	    compatible_masters_set_it = compatible_masters_set.find(current_master_name);
@@ -673,9 +674,11 @@ std::vector<double> EcoRLEnvironment::extractSpareUtilization() {
 }
 
   std::string EcoAction::toString(){
+    std::stringstream strstr;
     switch (type) {
     case EcoAction::ActionType::RESIZE:
-      return std::string("Resize");
+      strstr << "Resize. Instance " << resize -> instance_name << " New master " << resize -> new_master << "Spare instance " << resize -> spare_instance << " improvements " << resize -> predicted_improvement << "\n";
+      return strstr.str();
     default:
       return std::string("Unsupported");
     }
