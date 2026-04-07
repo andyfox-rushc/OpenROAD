@@ -22,12 +22,14 @@ class DQNAgent;
 struct ResizeAction {
   std::string instance_name;
   std::string new_master;          // e.g., BUF_X2 -> BUF_X4
-  std::string spare_instance;
+  std::string spare_instance; //redundant
+  
   double predicted_improvement;
-    
-    // Source information
-    int critical_path_index;
-    int instance_index_in_path;
+  std::shared_ptr<SpareCell> spare_candidate;
+  
+  // Source information
+  int critical_path_index;
+  int instance_index_in_path;
 };
 
 // 2. Rebuffer Action - Insert/remove/modify buffers on a net
@@ -297,10 +299,9 @@ public:
     // Action space management for different types
   std::vector<std::shared_ptr<EcoAction> > getValidActions(const DesignState& state);
     
-    // Specific action generators
+  // Specific action generators
   std::vector<std::shared_ptr<EcoAction> > generateResizeActions(const PathAnalysis& analysis);
   std::vector<std::shared_ptr<EcoAction> > generateShannonActions(const PathAnalysis& analysis);
-  
   std::vector<std::shared_ptr<EcoAction> > generateRebufferActions(const PathAnalysis& analysis);
   std::vector<std::shared_ptr<EcoAction> > generateLoadSplitActions(const PathAnalysis& analysis);
   std::vector<std::shared_ptr<EcoAction> > generateRetimeActions(const PathAnalysis& analysis);
@@ -355,8 +356,8 @@ private:
     
     // Move execution with journaling
 
-    void acceptMove();
-    void rejectMove();
+  void acceptMove(const std::shared_ptr<EcoAction> action);
+  void rejectMove(const std::shared_ptr<EcoAction> action);
     
     // State extraction helpers
     std::vector<double> extractPathFeatures(const std::vector<PathInfo>& paths);
@@ -371,7 +372,11 @@ private:
 
   std::map<size_t,std::shared_ptr<EcoAction> > index2action_;
   std::map<std::shared_ptr<EcoAction>,size_t > action2index_;
-
+  
+  //as we commit moves we keep track of the spare cells we have used in execute move
+  //in any state.
+  std::set<std::shared_ptr<SpareCell> > all_states_used_spare_cells_;
+  
   friend class EcoQLearningTrainer; //to access resizer
 };
 

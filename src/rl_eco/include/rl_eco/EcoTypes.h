@@ -151,8 +151,8 @@ inline odb::dbMaster* getCellMaster(odb::dbInst* inst) {
 }
 
 
-typedef std::map<std::string,
-		 std::vector<std::tuple <bool, std::shared_ptr<SpareCell> > >
+  typedef std::map<std::string,//instance name of spare cell
+		   std::vector<std::tuple <bool, std::shared_ptr<SpareCell> > > //used, reference to spare cell.
 		 > SpareCellsDictionary;
   
     

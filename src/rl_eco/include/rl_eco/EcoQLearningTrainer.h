@@ -44,7 +44,7 @@ public:
     
     // Training methods
     void train(size_t num_episodes);
-    void trainEpisode();
+    void trainEpisode(bool& no_more);
     void applyInference();  
     double evaluate(size_t num_episodes = 10);
     double getBestReward() const { return best_episode_reward_; }

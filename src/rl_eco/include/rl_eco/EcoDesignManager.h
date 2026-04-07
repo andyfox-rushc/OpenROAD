@@ -141,7 +141,7 @@ public:
   std::vector<std::shared_ptr<SpareCell> > getSpareCells();  
   std::vector<std::shared_ptr<SpareCell> > getAvailableSpares(const std::string& type = "") const;
   std::shared_ptr<SpareCell> findNearestSpare(int x, int y, const std::string& type);
-  std::vector<std::shared_ptr<SpareCell> > findSpareCellsNear(
+  std::vector<std::shared_ptr<SpareCell> > findSpareCellsNear(//pass in cells used in prior states here
 							      odb::dbInst* instance,
 							      long long radius);
 
@@ -179,7 +179,7 @@ public:
   void markUsed(const std::string& name, SpareCellsDictionary& spare_cells_dictionary);
   void populateSpareCellsDictionary(SpareCellsDictionary& spare_cells_dictionary);
   void wireLengthCache(bool value){use_wire_length_cache_=value;}
-  
+
 private:
     // OpenROAD database handles
   odb::dbDatabase* db_;
