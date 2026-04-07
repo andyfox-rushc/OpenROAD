@@ -71,8 +71,13 @@ EcoQLearningTrainer::EcoQLearningTrainer(std::shared_ptr<EcoDesignManager> manag
 }
 
 void EcoQLearningTrainer::train(size_t num_episodes) {
-    for (size_t episode = 0; episode < num_episodes; ++episode) {
-        trainEpisode();
+  bool no_more_actions=false;
+  for (size_t episode = 0; episode < num_episodes && (no_more_actions == false); ++episode) {
+        trainEpisode(no_more_actions);
+	
+	if (no_more_actions == true){
+	  printf("Abandoning -no more actions !\n");
+	}
         
         // Decay epsilon
         agent_->decayEpsilon();
@@ -104,20 +109,17 @@ void EcoQLearningTrainer::train(size_t num_episodes) {
       env_ -> state_size(state_features.size() > env_ -> state_size()?
 			 state_features.size():
 			 env_ -> state_size());
-      
       // Get valid actions for this episode.
       // Side effect is to construct means of indexing actions
       // (populates environment action2index, index2action)
       //
       auto valid_actions_enum = env_->getValidActions(state);
-
       logger_->info(utl::ECO, 998, "Inference Moves {}:  TNS {} WNS {}",
 		    steps,
 		    state.tns,
 		    state.wns);
 
       // Get Q-values for all actions (before selection)
-
       if (state_features.size() < env_ -> getStateSize()){
 	for (size_t s = state_features.size();
 	     s != env_ -> getStateSize();
@@ -127,7 +129,6 @@ void EcoQLearningTrainer::train(size_t num_episodes) {
       }
       
       auto q_values = agent_->getQValues(state_features);
-      
       printf("Number of q values %d when action count is %d\n",
 	     q_values.size(),
 	     valid_actions_enum.size()
@@ -207,16 +208,22 @@ void EcoQLearningTrainer::train(size_t num_episodes) {
 
 
   
-void EcoQLearningTrainer::trainEpisode() {
+void EcoQLearningTrainer::trainEpisode(bool& no_more) {
+
+  no_more =false;
   env_->reset();
-  auto state = env_ -> getCurrentState();
+  auto state = env_ -> getCurrentState(); //as side effect updates critical paths
   double episode_reward = 0.0;
   size_t steps = 0;
+
+  
   std::vector<std::shared_ptr<EcoAction> > episode_actions;
+  
   int zero_action_count=0;
   
     while (steps < config_.max_steps_per_episode) {
-        // Get current state as feature vector
+      
+      // Get current state as feature vector
       auto state_features = state.toVector();
 
       // Get valid actions for this episode.
@@ -224,10 +231,17 @@ void EcoQLearningTrainer::trainEpisode() {
       // (populates environment action2index, index2action)
       //
       printf("Getting valid  actions \n");
-      auto valid_actions_enum = env_->getValidActions(state);
-      printf("Number of valid actions %d\n", valid_actions_enum.size());
+      auto valid_actions_enum = env_->getValidActions(state); //updates critical paths
+      printf("Number of valid actions %d (zero count %d)\n",
+	     valid_actions_enum.size(),
+	     zero_action_count
+	     );
+
       if (valid_actions_enum.size() == 0){
+	//stop after zero actions
 	if (zero_action_count >=2){
+	  printf("Bailing on 2 Zero action count !\n");
+	  no_more = true;
 	  return;
 	}
 	zero_action_count = zero_action_count+1;
@@ -236,15 +250,15 @@ void EcoQLearningTrainer::trainEpisode() {
 	zero_action_count = 0;
       }
       
-      logger_->info(utl::ECO, 998, "Step {}: Moves attempted {}: Moves accepted {} TNS {} WNS {}",
+      logger_->info(utl::ECO, 998, "Step {}: Action count {} Moves attempted {}: Moves accepted {} TNS {} WNS {}",
 		    steps,
+		    valid_actions_enum.size(),
 		    state.moves_attempted,
 		    state.moves_accepted,
 		    state.tns,
 		    state.wns);
 
       // Get Q-values for all actions (before selection)
-
       printf("State features size =%d state_size = %d\n",
 	     state_features.size(),
 	     env_ -> getStateSize());
@@ -286,9 +300,11 @@ void EcoQLearningTrainer::trainEpisode() {
       }
       
       if (valid_actions.empty()) {
+	printf("Breaking -- no valid actions !\n");
+	no_more = true;
 	break;
       }
-        
+
       // Select action
       size_t action_index = agent_->selectAction(state_features, valid_actions, true);
 
@@ -303,6 +319,7 @@ void EcoQLearningTrainer::trainEpisode() {
         
       // Take action
       double reward = env_->step(action);
+      //advances state, updates timing
       auto next_state = env_ -> getCurrentState();
       bool done = env_->isEpisodeDone();
 
@@ -360,6 +377,7 @@ double EcoQLearningTrainer::evaluate(size_t num_episodes) {
             }
             
             if (valid_actions.empty()) {
+	      printf("Weird no actions !\n");
                 break;
             }
             

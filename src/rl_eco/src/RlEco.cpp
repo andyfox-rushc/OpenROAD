@@ -150,16 +150,17 @@ void RlEco::trainAgent(int episodes,
     // Create checkpoint directory if it doesn't exist
     std::filesystem::create_directories(checkpoint_dir_);
   }
-  
+  bool no_more_actions=false;
   // Custom training loop with checkpointing
-  for (int episode = 0; episode < episodes; ++episode) {
-    trainer_->trainEpisode();
-    
+  for (int episode = 0; episode < episodes && (no_more_actions == false); ++episode) {
+    trainer_->trainEpisode(no_more_actions);
+    if (no_more_actions){
+      printf("Abandoning training, no more useful actions !\n");
+    }
     // Progress reporting
     if (episode % 100 == 0) {
       trainer_->printTrainingProgress(episode);
     }
-    
     // Checkpointing
     if (checkpoint_enabled_ && episode > 0 && episode % checkpoint_interval_ == 0) {
       std::string checkpoint_path = checkpoint_dir_ + "/checkpoint_episode_" + 
@@ -167,7 +168,6 @@ void RlEco::trainAgent(int episodes,
       trainer_->saveAgent(checkpoint_path);
       logger_->info(utl::RLE, 11, "Saved checkpoint at episode {}", episode);
     }
-    
     // Allow TCL events
     if (episode % 10 == 0) {
       Tcl_DoOneEvent(TCL_DONT_WAIT);

@@ -239,15 +239,15 @@ std::string EcoDesignManager::getSpareType(dbMaster* master) const {
 }
 
   void EcoDesignManager::populateSpareCellsDictionary(SpareCellsDictionary& spare_cells_dictionary){
+    printf("Todo: populate spare cells dictionary\n");
   }
-  
+
+  void EcoDesignManager::markUsed(const std::string& inst_name,
+				  SpareCellsDictionary& spare_cells_dictionary){
+  }
   bool EcoDesignManager::isFeasibleMaster(const std::string& name, SpareCellsDictionary& spare_cells_dictionary){
     printf("Todo !\n");
     return false;
-  }
-
-  void EcoDesignManager::markUsed(const std::string& name, SpareCellsDictionary& spare_cells_dictionary){
-    printf("Todo !\n");
   }
 
   
@@ -378,7 +378,10 @@ std::vector<std::shared_ptr<SpareCell> > EcoDesignManager::findSpareCellsNear(
         if (!spare_inst) {
             continue;
         }
-        
+	if (spare -> is_used){
+	  printf("Skipping used spare cell \n");
+	  continue;
+	}
         // Get spare cell location
         int spare_x, spare_y;
         spare_inst->getLocation(spare_x, spare_y);
@@ -535,29 +538,13 @@ EcoDesignManager::MoveResult EcoDesignManager::calculateMoveImpact(
 							       odb::dbInst* spare_inst
 					     ){
     // Use Resizer's journaling
-    auto journal_start = std::chrono::steady_clock::now();    
     resizer_->journalBegin();
-    auto journal_end = std::chrono::steady_clock::now();
-    auto journal_duration = journal_end - journal_start;
-    
-    auto start = std::chrono::steady_clock::now();
-
-
     
     MoveResult result = performInstanceSwap(inst, spare_inst);
 
-    
-    auto end = std::chrono::steady_clock::now();
-    std::chrono::duration<double,std::milli> duration = end-start;
-    //    printf("Time to perform instance swap %.10f ms\n",duration.count());    
-    // Restore original state
-    auto journal_start1 = std::chrono::steady_clock::now();        
+    //restore the journal
     resizer_->journalRestore();
-    auto journal_end1 = std::chrono::steady_clock::now();
-    auto journal_duration1 = journal_end1 - journal_start1;
-    std::chrono::duration<double,std::milli> journal_total= journal_duration1 + journal_duration;
-    //    printf("Time for journalling move %.10f ms\n",journal_total.count());
-    // Result contains timing_improvement without permanent changes
+
     return result;
   }
 
@@ -565,7 +552,7 @@ EcoDesignManager::MoveResult EcoDesignManager::calculateMoveImpact(
   EcoDesignManager::MoveResult EcoDesignManager::performInstanceSwap(
 								     odb::dbInst* inst,
 								     odb::dbInst* spare_inst){
-
+							
 
     /*    printf("Swapping Instance %s (cell %s)  with spare instance %s (cell %s)\n",
 	   inst -> getName().c_str(),
@@ -659,68 +646,6 @@ EcoDesignManager::MoveResult EcoDesignManager::performResize(
     }
 
     
-    /*
-    // Check if we need to use a spare cell
-    if (isSpareCell(inst)) {
-    
-      printf("Not sure what the hell this does!\n");
-
-        // Handle spare cell replacement
-      std::string new_master_name = spare_inst-> getName();
-        dbMaster* new_master = db_->findMaster(new_master_name.c_str());
-        if (!new_master) {
-	  return {false, 0.0, 0.0, 0.0, "Master cell not found: " + new_master_name};
-        }
-        
-        std::string spare_type = getSpareType(new_master);
-	std::shared_ptr<SpareCell> spare = findNearestSpare(target_inst->getBBox()->xMin(), 
-					    target_inst->getBBox()->yMin(), 
-					    spare_type);
-        if (!spare) {
-	  return {false, 0.0, 0.0, 0.0, "No suitable spare cell available"};
-        }
-        // Perform the spare cell swap
-        performSpareCellSwap(target_inst, spare, new_master);
-
-    } else {
-        // For regular cells, use Resizer's functionality
-        sta::Instance* sta_inst = dbsta_->getDbNetwork()->dbToSta(inst);
-        sta::LibertyCell* new_cell = dbsta_ -> getDbNetwork() ->
-	  findLibertyCell(spare_inst -> getMaster() -> getName().c_str());
-        
-        if (!new_cell) {
-	  return {false, 0.0, 0.0, 0.0, "New master cell not found: " + new_master_name};
-        }
-        
-        // Check if this is a valid swap using Resizer's logic
-        sta::LibertyCell* current_cell = resizer_->getDbNetwork()->libertyCell(sta_inst);
-        auto swappable_cells = resizer_->getSwappableCells(current_cell);
-
-	printf("Source cell type %s\n", inst -> getMaster() -> getName().c_str());
-	
-        bool is_valid_swap = false;
-        for (auto cell : swappable_cells) {
-	  printf("Allowed swappable cell %s\n", cell -> name());
-	  if (cell == new_cell) {
-	    is_valid_swap = true;
-	    break;
-	  }
-        }
-        
-        if (!is_valid_swap) {
-	  //
-	  //try a spare cell ???
-	  //
-	  return {false, 0.0, 0.0, 0.0, "Cell swap not valid according to Resizer rules"};
-        }
-        
-        // Use Resizer's replaceCell 
-        if (!resizer_->replaceCell(sta_inst, new_cell, true)) {
-	  return {false, 0.0, 0.0, 0.0, "Failed to replace cell"};
-        }
-    }
-    */
-
     // Update timing
     sta_->updateTiming(false);
     
@@ -882,12 +807,9 @@ std::vector<PathInfo> EcoDesignManager::getCriticalPaths(int path_count) {
         
         // Store the path
         info.sta_path = path_end->path();
-        
         // Extract instances and nets along the path
         extractPathElements(path_end->path(), info.instances, info.nets);
-        
         critical_paths.push_back(info);
-        
         // Stop if we have enough paths
         if (critical_paths.size() >= static_cast<size_t>(path_count)) {
             break;
@@ -1170,6 +1092,7 @@ double EcoDesignManager::evaluateWorstNegativeSlack() {
   double EcoDesignManager::evaluateTotalPower(){
     return 0.1;
   }
+
   
 double EcoDesignManager::evaluateDesignArea() {
     // Use Resizer's area calculation
@@ -1332,5 +1255,7 @@ EcoDesignManager::MoveResult EcoDesignManager::insertBuffer(
 		    );
     }
   }
+
+
   
 }

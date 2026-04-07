@@ -54,12 +54,11 @@ DQNAgent::DQNAgent(size_t state_size, size_t action_size, const QLearningConfig&
     // In inference mode, always exploit (no exploration)
     if (inference_mode_i || (!training && std::rand() / double(RAND_MAX) >= epsilon_)) {
         // Fast path for inference - direct forward pass
+      printf("Forward pass for select action -- choosing best!\n");
         auto q_values = q_network_->forward(state);
-        
         // Find the best valid action
         double max_q = -std::numeric_limits<double>::infinity();
         size_t best_action = valid_actions[0];
-        
         for (size_t action : valid_actions) {
             if (q_values[action] > max_q) {
                 max_q = q_values[action];
@@ -68,6 +67,7 @@ DQNAgent::DQNAgent(size_t state_size, size_t action_size, const QLearningConfig&
         }
         return best_action;
     }
+    printf("Exploration !\n");
     // Exploration: random valid action
     return valid_actions[std::rand() % valid_actions.size()];
 }

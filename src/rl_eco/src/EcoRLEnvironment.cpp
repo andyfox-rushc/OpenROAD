@@ -114,11 +114,15 @@ DesignState EcoRLEnvironment::getCurrentState() {
     }
     
     if (should_accept) {
-        acceptMove();
+      //make the spare cell as used
+      acceptMove(action);
+      printf("Accepted move gain %.10f and not restored state, but ended journal\n",
+	     result.timing_improvement);
         current_stats_.moves_accepted++;
         recent_improvements_.push_back(result.timing_improvement);
     } else {
-        rejectMove();
+      printf("Rejected move and not restored state, ended journal\n");      
+        rejectMove(action);
         current_stats_.moves_rejected++;
         recent_improvements_.push_back(0.0);
         reward = -0.1;  // Small penalty for rejected move
@@ -261,8 +265,8 @@ std::vector<std::shared_ptr<EcoAction> > EcoRLEnvironment::getValidActions(const
       odb::dbInst* inst = path_info.instances[inst_idx];
       if (design_manager_ -> isFeasibleMaster(inst -> getMaster() -> getName(),
 					      spare_cells_dictionary)){
-	design_manager_ -> markUsed(inst -> getMaster() -> getName(),
-				    spare_cells_dictionary);
+	//	design_manager_ -> markUsed(inst -> getMaster() -> getName(),
+	//				    spare_cells_dictionary);
 	printf("%s -> ", inst -> getName().c_str());
       }
     }
@@ -275,45 +279,47 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateShannonActions
         const auto& path = analysis.critical_paths[path_idx];
 	odb::dbITerm* start_iterm=nullptr;
 	odb::dbITerm* end_iterm=nullptr;
-	
 	if (IsShannonFeasible(path,start_iterm, end_iterm,EcoRLEnvironment::SHANNON_DEPTH)){
 	  printf("Found shannon feasible split path\n");
-	}
-	sta::dbSta* sta = ord::OpenRoad::openRoad()->getSta();
+	  sta::dbSta* sta = ord::OpenRoad::openRoad()->getSta();
 		printf("Examining path %d:  slack %s ns\n",path.index,delayAsString(path.slack,sta));
 		for (int inst_idx = 0; inst_idx < path.instances.size(); ++inst_idx) {
 		  odb::dbInst* inst = path.instances[inst_idx];
 		  printf("%s -> ", inst -> getName().c_str());
 		}
 		printf("\n");
+	}
   }  
 }
 
   
 std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateResizeActions(
-    const PathAnalysis& analysis) {
+										const PathAnalysis& analysis) {
 
   //use the caching
   design_manager_ -> wireLengthCache(true);
   
   std::vector<std::shared_ptr<EcoAction>> actions;
 
-    std::map<std::string,std::set<std::string> > compatible_masters_set;
-    std::map<std::string,std::set<std::string> > ::iterator  compatible_masters_set_it;
-    std::set<std::string> compatible_masters;
+  std::map<std::string,std::set<std::string> > compatible_masters_set;
+  std::map<std::string,std::set<std::string> > ::iterator  compatible_masters_set_it;
+  std::set<std::string> compatible_masters;
+    
+  std::set<std::shared_ptr<SpareCell> > used_spare_cells;
     
     // For each critical path
     for (int path_idx = 0; path_idx < analysis.critical_paths.size(); ++path_idx) {
         const auto& path = analysis.critical_paths[path_idx];
 
 	sta::dbSta* sta = ord::OpenRoad::openRoad()->getSta();
+	/*
 		printf("Examining path %d:  slack %s ns\n",path.index,delayAsString(path.slack,sta));
 		for (int inst_idx = 0; inst_idx < path.instances.size(); ++inst_idx) {
 		  odb::dbInst* inst = path.instances[inst_idx];
 		  printf("%s -> ", inst -> getName().c_str());
 		}
 		printf("\n");
-	
+	*/
         // For each instance in the path
         for (int inst_idx = 0; inst_idx < path.instances.size(); ++inst_idx) {
             odb::dbInst* inst = path.instances[inst_idx];
@@ -327,8 +333,9 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateResizeActions(
 	    
 	    std::vector<std::shared_ptr<SpareCell>> nearby_spares = findNearbySpares(inst, max_radius);
 
+
 	    auto start = std::chrono::steady_clock::now();
-	    //change to set
+
 	    compatible_masters_set_it = compatible_masters_set.find(current_master_name);
 	    if (compatible_masters_set_it != compatible_masters_set.end()){
 	      compatible_masters = (*compatible_masters_set_it).second;
@@ -346,7 +353,15 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateResizeActions(
 
 	    for (auto spare_candidate: nearby_spares){
 
+	      //skip any spares we have already used.
+	      if (used_spare_cells.find(spare_candidate) != used_spare_cells.end()){
+		continue;
+	      }
 
+	      if (all_states_used_spare_cells_.find(spare_candidate) !=
+		  all_states_used_spare_cells_.end()){
+		continue;
+	      }
 	      
 	      odb::dbInst* spare_inst = spare_candidate -> instance;
 	      odb::dbMaster* spare_master = spare_candidate -> master;
@@ -371,7 +386,8 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateResizeActions(
 
 
 	      start = std::chrono::steady_clock::now();
-	      //Try the swap. Swap instance for spare
+	      
+	      //Preview the move, will it lead to a good result ?
 	      EcoDesignManager::MoveResult move_gain = 
 		design_manager_->previewResize(inst, spare_inst);
 
@@ -381,6 +397,7 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateResizeActions(
 
 	      // Only create action if there's predicted improvement
                 if (move_gain.timing_improvement > 0) {
+		  //yes form the action
                     // Create EcoAction with ResizeAction
                     auto action = std::make_shared<EcoAction>();
                     action->type = EcoAction::ActionType::RESIZE;
@@ -389,16 +406,17 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateResizeActions(
                     action->resize->new_master = spare_master_name;
                     action->resize->critical_path_index = path_idx;
                     action->resize->instance_index_in_path = inst_idx;
-                    
                     action->resize->spare_instance = spare_candidate -> instance -> getName(); 
-                    
+		    action -> resize -> spare_candidate = spare_candidate;
                     // Set metrics
                     action->predicted_improvement = move_gain.timing_improvement;
                     action->resize->predicted_improvement = action->predicted_improvement;
                     action->affected_critical_paths = 1;
                     action->confidence_score = 0.8;
-                    
                     actions.push_back(action);
+
+		    //mark that we have used this spare cell
+		    used_spare_cells.insert(spare_candidate);
                 }
 	    }
         }
@@ -552,6 +570,13 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateLogicRemapActi
 	std::string spare_instance_name = action -> resize -> spare_instance;
 	odb::dbInst* original_instance = design_manager_ -> findInst(original_instance_name);
 	odb::dbInst* new_instance = design_manager_ -> findInst(spare_instance_name);
+
+	//mark spare instance as used.
+	//if original instance is spre, mark it as free
+	//TODO make this a set
+	printf("Todo mark this as used %s\n",
+	       spare_instance_name.c_str());
+	
 	return design_manager_->performInstanceSwap(original_instance,
 						new_instance);
       }
@@ -563,11 +588,21 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateLogicRemapActi
   }
   
 
-void EcoRLEnvironment::acceptMove() {
+  void EcoRLEnvironment::acceptMove(const std::shared_ptr<EcoAction> action) {
+
+    
+    if (action -> type == EcoAction::ActionType::RESIZE){
+      //update the spare cell free list
+      const std::shared_ptr<SpareCell> used_spare = action -> resize -> spare_candidate;
+      all_states_used_spare_cells_.insert(used_spare);
+    }
+
+    
+  
     resizer_->journalEnd();
 }
 
-void EcoRLEnvironment::rejectMove() {
+  void EcoRLEnvironment::rejectMove(const std::shared_ptr<EcoAction> action) {
     resizer_->journalRestore();
     resizer_->journalEnd();
 }
