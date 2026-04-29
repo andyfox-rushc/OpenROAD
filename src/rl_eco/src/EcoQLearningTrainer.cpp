@@ -37,9 +37,6 @@ namespace eco {
     agent_ = std::make_unique<DQNAgent>(feature_size,action_size, config);
     agent_ -> loadModel(filepath);
     agent_ -> setInferenceMode(true);
-    printf("Making inference agent for state size %d and Action size %d\n",
-	   feature_size,
-	   action_size);
   }
 
 
@@ -114,6 +111,7 @@ void EcoQLearningTrainer::train(size_t num_episodes) {
       // (populates environment action2index, index2action)
       //
       auto valid_actions_enum = env_->getValidActions(state);
+      
       logger_->info(utl::ECO, 998, "Inference Moves {}:  TNS {} WNS {}",
 		    steps,
 		    state.tns,
@@ -135,11 +133,6 @@ void EcoQLearningTrainer::train(size_t num_episodes) {
 	     );
 
 
-      if (q_values.size() == 0){
-	printf("Why no q values ???\n");
-	exit(0);
-      }
-      
       //debug
       logger_->info(utl::ECO, 999, "Q-values for valid actions:");
       for (size_t i = 0; i < valid_actions_enum.size(); ++i) {
@@ -176,17 +169,18 @@ void EcoQLearningTrainer::train(size_t num_episodes) {
 
       bool done=false;
       // Take action
-      env_ -> resizer_->journalBegin();      
+      env_ -> resizer_->journalBegin();
+      printf("Inference. About to do this action %s\n", action -> toString().c_str());
+      
       EcoDesignManager::MoveResult result = env_ -> executeMove(action);      
       if (result.timing_improvement < 0.0){
-	printf("Things got worse ! for tns by %.10f \n", result.timing_improvement);	
 	env_ -> resizer_->journalRestore();
 	done=true;
       }
       else{
-	printf("Things getting better in tns by %.10f!\n",result.timing_improvement);
+	env_ -> resizer_ -> journalEnd();	
       }
-      env_ -> resizer_ -> journalEnd();
+
       
       auto next_state = env_ -> getCurrentState();
       if (env_ -> isEpisodeDone()){
@@ -262,6 +256,7 @@ void EcoQLearningTrainer::trainEpisode(bool& no_more) {
       printf("State features size =%d state_size = %d\n",
 	     state_features.size(),
 	     env_ -> getStateSize());
+      
       if (state_features.size() < env_ -> getStateSize()){
 	for (size_t s = state_features.size();
 	     s != env_ -> getStateSize();
@@ -316,7 +311,8 @@ void EcoQLearningTrainer::trainEpisode(bool& no_more) {
 	
       // Convert index back to action
       std::shared_ptr<EcoAction> action = env_ -> getActionFromIndex(action_index);
-        
+
+      printf("Taking action %s\n", action -> toString().c_str());
       // Take action
       double reward = env_->step(action);
       //advances state, updates timing
@@ -480,6 +476,12 @@ std::string EcoQLearningTrainer::generateTrainingReport() const {
 	       best_action_sequence_[i]  -> resize -> spare_instance.c_str(),
 	       best_action_sequence_[i]  -> resize -> new_master.c_str(),
 	       best_action_sequence_[i]  -> resize -> predicted_improvement);
+      }
+      else if (best_action_sequence_[i]  -> type == eco::EcoAction::ActionType::PATH_SPLIT){
+	printf("%s\n", best_action_sequence_[i] -> toString().c_str());
+      }
+      else {
+	printf("Weird, unknown action !\n");
       }
     }
     

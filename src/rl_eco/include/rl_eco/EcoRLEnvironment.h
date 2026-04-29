@@ -15,8 +15,11 @@ namespace eco {
 class QNetwork;
 class DQNAgent;
 
-// ========== ECO Move Type Definitions ==========
 
+  
+// ========== ECO Move Type Definitions ==========
+// All the things we can do on a def view of a chip
+//
   
 // 1. Resize Action - Replace instance with different drive strength
 struct ResizeAction {
@@ -92,34 +95,18 @@ struct LoadSplitAction {
 
 // 4. Retime Action - Move sequential elements
 struct RetimeAction {
-    enum class RetimeOp {
-        FORWARD_RETIME,     // Move register forward through logic
-        BACKWARD_RETIME,    // Move register backward through logic
-        DUPLICATE_REGISTER, // Clone register for high fanout
-        MERGE_REGISTERS     // Combine equivalent registers
-    };
+  enum class RetimeOp {
+		       FORWARD_RETIME,     // Move register forward through logic
+		       BACKWARD_RETIME     // Move register backward through logic
+  };
     
-    RetimeOp operation;
-    std::string register_instance;
+  RetimeOp operation;
+  odb::dbInst* flop;
+  odb::dbITerm* d;
+  odb::dbITerm* q;
     
-    // For FORWARD/BACKWARD_RETIME
-    std::vector<std::string> logic_instances_to_cross;  // Logic to move across
-    std::string target_position;     // Where to place register
-    
-    // For DUPLICATE_REGISTER  
-    int num_duplicates;
-    std::vector<std::string> sink_assignments;  // Which sinks to each copy
-    std::vector<std::string> spare_registers;   // Available spare flops
-    
-    // For MERGE_REGISTERS
-    std::vector<std::string> registers_to_merge;
-    
-    // Timing constraints
-    bool verify_no_hold_violation;
-    double min_slack_threshold;
-    
-    double predicted_improvement;
-    int affected_paths_count;
+  double predicted_improvement;
+
 };
 
 // 5. Pipeline Action - Insert pipeline registers
@@ -200,27 +187,47 @@ struct LogicRemapAction {
 };
   
 
+  /*
+    The Shannon Splitting. Heavy duty path speed up algorithm
+  */
+  
+  struct PathSplitAction {
+    odb::dbITerm* start_point;
+    odb::dbITerm* end_point;
+    int shannon_depth;
+    double predicted_improvement;    
+    std::vector<std::pair<odb::dbInst*,std::shared_ptr<SpareCell> > > gates_to_duplicate;
+    std::shared_ptr<SpareCell> spare_mux_cell;
+    odb::dbITerm* mux2xn_d0;
+    odb::dbITerm* mux2xn_d1;
+    odb::dbITerm* mux2xn_sel;
+    odb::dbITerm* mux2xn_op;
+  };
+
 
 struct EcoAction {
     enum class ActionType {
-        RESIZE,
-        REBUFFER,
-        LOAD_SPLIT,
-        RETIME,
-        PIPELINE,
-        LOGIC_REMAP
+			   RESIZE, //resize a buffer
+			   REBUFFER, //add new buffers
+			   LOAD_SPLIT, //split loads
+			   RETIME, //move flops
+			   PIPELINE, //insert flops
+			   LOGIC_REMAP,//cut based remapping
+			   PATH_SPLIT //The Shannon splitting
     };
     
-    ActionType type;
+  ActionType type;
     
     // Union-like structure (in practice might use std::variant)
-    std::unique_ptr<ResizeAction> resize;
-    std::unique_ptr<RebufferAction> rebuffer;
-    std::unique_ptr<LoadSplitAction> load_split;
-    std::unique_ptr<RetimeAction> retime;
-    std::unique_ptr<PipelineAction> pipeline;
-    std::unique_ptr<LogicRemapAction> logic_remap;
-    
+  std::unique_ptr<ResizeAction> resize;
+  std::unique_ptr<RebufferAction> rebuffer;
+  std::unique_ptr<LoadSplitAction> load_split;
+  std::unique_ptr<RetimeAction> retime;
+  std::unique_ptr<PipelineAction> pipeline;
+  std::unique_ptr<LogicRemapAction> logic_remap;
+  std::unique_ptr<PathSplitAction> path_split;
+
+  
     // Common fields
   double predicted_improvement;
   double confidence_score;
@@ -260,7 +267,8 @@ struct DesignState {
 
   
 class EcoRLEnvironment {
-  const unsigned SHANNON_DEPTH=4;
+  
+  const unsigned SHANNON_DEPTH=4; /* The minimum path for splitting */
 public:
   EcoRLEnvironment(std::shared_ptr<EcoDesignManager> manager, 
                      rsz::Resizer* resizer,
@@ -277,7 +285,10 @@ public:
   bool IsShannonFeasible(const eco::PathInfo& path_info,
 			 odb::dbITerm* &start_iterm,
 			 odb::dbITerm* &end_iterm,
-			 unsigned N);
+			 std::vector<std::pair<odb::dbInst*,std::shared_ptr<SpareCell> > >
+			 &gates_to_duplicate,
+			 int N);
+  bool implementShannonMove(std::shared_ptr<EcoAction> shannon_action);
   
   size_t state_size() {return state_size_;}
   void state_size(size_t s){state_size_ = s;}
@@ -302,9 +313,11 @@ public:
   // Specific action generators
   std::vector<std::shared_ptr<EcoAction> > generateResizeActions(const PathAnalysis& analysis);
   std::vector<std::shared_ptr<EcoAction> > generateShannonActions(const PathAnalysis& analysis);
+  std::vector<std::shared_ptr<EcoAction> > generateRetimeActions();
+  
   std::vector<std::shared_ptr<EcoAction> > generateRebufferActions(const PathAnalysis& analysis);
   std::vector<std::shared_ptr<EcoAction> > generateLoadSplitActions(const PathAnalysis& analysis);
-  std::vector<std::shared_ptr<EcoAction> > generateRetimeActions(const PathAnalysis& analysis);
+
   std::vector<std::shared_ptr<EcoAction> > generatePipelineActions(const PathAnalysis& analysis);
   std::vector<std::shared_ptr<EcoAction> > generateLogicRemapActions(const PathAnalysis& analysis);
      
@@ -325,6 +338,8 @@ public:
   EcoDesignManager::MoveResult executeMove(const std::shared_ptr<EcoAction> action);  
   size_t max_action_size(){return max_action_size_;}
 
+
+  
 private:
     // Core components
   std::shared_ptr<EcoDesignManager> design_manager_;
@@ -358,7 +373,14 @@ private:
 
   void acceptMove(const std::shared_ptr<EcoAction> action);
   void rejectMove(const std::shared_ptr<EcoAction> action);
-    
+
+  //Shannon Handling
+
+  void populateCompatibleSpareCells(odb::dbMaster*,
+				    std::map<odb::dbMaster*,
+				    std::vector<std::shared_ptr<SpareCell> >>   &master2candidates);
+
+
     // State extraction helpers
     std::vector<double> extractPathFeatures(const std::vector<PathInfo>& paths);
     std::vector<double> extractSpareUtilization();

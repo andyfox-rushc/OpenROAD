@@ -24,16 +24,16 @@ DQNAgent::DQNAgent(size_t state_size, size_t action_size, const QLearningConfig&
        {
     
     // Build network architecture
-	 printf("DQNAgent layers:\n");
+	 //	 printf("DQNAgent layers:\n");
     std::vector<size_t> layer_sizes;
     layer_sizes.push_back(state_size);
     int ix=0;
     for (size_t hidden_size : config.hidden_layers) {
-      printf("DQNAgent Layer %d size %d\n",ix, hidden_size);
+      //      printf("DQNAgent Layer %d size %d\n",ix, hidden_size);
       layer_sizes.push_back(hidden_size);
       ix++;
     }
-    printf("Building last layer of size %d\n",action_size);
+    //    printf("Building last layer of size %d\n",action_size);
     layer_sizes.push_back(action_size);
     
     // Create Q-network and target network
@@ -54,7 +54,13 @@ DQNAgent::DQNAgent(size_t state_size, size_t action_size, const QLearningConfig&
     // In inference mode, always exploit (no exploration)
     if (inference_mode_i || (!training && std::rand() / double(RAND_MAX) >= epsilon_)) {
         // Fast path for inference - direct forward pass
-      printf("Forward pass for select action -- choosing best!\n");
+      //if (inference_mode_i){
+      //	printf("Inference mode chosing best\n");
+      //      }
+      //      printf("Forward pass for select action -- choosing best!\n");
+      //
+      //The q values come from the weights learned during training.
+      //
         auto q_values = q_network_->forward(state);
         // Find the best valid action
         double max_q = -std::numeric_limits<double>::infinity();
@@ -65,22 +71,33 @@ DQNAgent::DQNAgent(size_t state_size, size_t action_size, const QLearningConfig&
                 best_action = action;
             }
         }
+	printf("Inference, best action %d\n", best_action);
         return best_action;
     }
-    printf("Exploration !\n");
+    printf("Exploration: Valid actions size %d !\n",valid_actions.size());
     // Exploration: random valid action
-    return valid_actions[std::rand() % valid_actions.size()];
+    printf("Value of std::rand() : %d\n", std::rand());
+    int random_ix = std::rand() % valid_actions.size();
+    printf("Exploration. Random action: %d\n",random_ix);
+    return valid_actions[random_ix];
 }
 
 
 void DQNAgent::remember(const Experience& exp) {
-
   if (inference_mode_i)
     return; //skip memory storage in inference mode
   replay_buffer_->add(exp);
 }
 
-
+  /*
+    / This is the core Bellman update happening here:
+    // Q(s,a) ← Q(s,a) + α[r + γ max_a' Q(s',a') - Q(s,a)]
+    //
+    // The code implements this as:
+    // 1. Q(s,a) = current_q_values[action]
+    // 2. target = r + γ max_a' Q(s',a')  
+    // 3. Network update moves Q(s,a) toward target
+    */
   
 double DQNAgent::train() {
     if (!replay_buffer_->canSample(config_.batch_size)) {
@@ -91,16 +108,19 @@ double DQNAgent::train() {
     double total_loss = 0.0;
     
     for (const auto& exp : batch) {
-        // Compute current Q-value
-        auto current_q_values = q_network_->forward(exp.state);
-        
-        // Compute target Q-value
+      // Compute current Q-value
+      // This is Q(s,a) - our current estimate, not the "true" value
+      auto current_q_values = q_network_->forward(exp.state);
+
+      // 2. BOOTSTRAP TARGET CALCULATION
+      // Compute target Q-value
         double target_q_value;
         if (exp.done) {
+	  // Terminal state: no future value
             target_q_value = exp.reward;
         } else {
-            auto next_q_values = target_network_->forward(exp.next_state);
-            
+	  // Non-terminal: bootstrap using our ESTIMATE of future value
+	  auto next_q_values = target_network_->forward(exp.next_state);
             if (config_.use_double_dqn) {
                 // Double DQN: use online network to select action, target network to evaluate
                 auto next_q_values_online = q_network_->forward(exp.next_state);
@@ -108,6 +128,9 @@ double DQNAgent::train() {
                     next_q_values_online.begin(),
                     std::max_element(next_q_values_online.begin(), next_q_values_online.end())
                 );
+		// This is the key bootstrapping step!
+		// We use our CURRENT ESTIMATE of future Q-values
+		// Not the true future values (which we don't know)
                 target_q_value = exp.reward + config_.gamma * next_q_values[best_action];
             } else {
                 // Standard DQN
@@ -117,11 +140,14 @@ double DQNAgent::train() {
         }
         
         // Create target vector
+	// 3. INCREMENTAL UPDATE
+	// Move our estimate toward the bootstrap target
         std::vector<double> target = current_q_values;
         target[exp.action] = target_q_value;
         
         // Train network
-        q_network_->train(exp.state, target, config_.learning_rate);
+	// Neural network does: Q(s,a) += learning_rate * (target - Q(s,a))
+	q_network_->train(exp.state, target, config_.learning_rate);
         
         // Calculate loss for statistics
         double loss = q_network_->computeLoss(current_q_values, target);

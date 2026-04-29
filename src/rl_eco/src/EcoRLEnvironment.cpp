@@ -172,6 +172,7 @@ PathAnalysis EcoRLEnvironment::analyzeCriticalPaths() {
     for (auto i2a: index2action_){
       valid_indices.push_back(i2a.first);
     }
+    printf("Number of valid action indices %d\n", valid_indices.size());
     return valid_indices;
   }
 
@@ -200,31 +201,41 @@ std::vector<std::shared_ptr<EcoAction> > EcoRLEnvironment::getValidActions(const
   auto analysis = analyzeCriticalPaths();
   auto end = std::chrono::steady_clock::now();
   std::chrono::duration<double,std::milli> duration = end-start;
+  
   //  printf("Time to analyze critical paths %.10f ms\n",duration);
 
-  auto generateShannonActions(analysis);
+  // Generate actions of each type  
+  //  printf("Generating Shannon Actions\n");
+  std::vector<std::shared_ptr<EcoAction> > shannon_actions = generateShannonActions(analysis);
   
-  std::vector<std::shared_ptr<EcoAction>> all_actions;
-  // Generate actions of each type
+  
+
   start = std::chrono::steady_clock::now();    
   auto resize_actions = generateResizeActions(analysis);
   end = std::chrono::steady_clock::now();
   duration = end-start;
-  //  printf("Time to generate Resize Actions %.10f ms \n",duration);
+
 
     auto rebuffer_actions = generateRebufferActions(analysis);
     auto load_split_actions = generateLoadSplitActions(analysis);
-    auto retime_actions = generateRetimeActions(analysis);
+    auto retime_actions = generateRetimeActions();
     auto pipeline_actions = generatePipelineActions(analysis);
     auto logic_remap_actions = generateLogicRemapActions(analysis);
-    
-    // Combine all actions
+
+    // Combine candidates to form all actions    
+    std::vector<std::shared_ptr<EcoAction>> all_actions;    
+    printf("# %d shannon actions\n", shannon_actions.size());
+    all_actions.insert(all_actions.end(), shannon_actions.begin(), shannon_actions.end());
+    printf("# %d resize actions\n", resize_actions.size());
     all_actions.insert(all_actions.end(), resize_actions.begin(), resize_actions.end());
     all_actions.insert(all_actions.end(), rebuffer_actions.begin(), rebuffer_actions.end());
     all_actions.insert(all_actions.end(), load_split_actions.begin(), load_split_actions.end());
-    all_actions.insert(all_actions.end(), retime_actions.begin(), retime_actions.end());
+    //    all_actions.insert(all_actions.end(), retime_actions.begin(), retime_actions.end());
     all_actions.insert(all_actions.end(), pipeline_actions.begin(), pipeline_actions.end());
     all_actions.insert(all_actions.end(), logic_remap_actions.begin(), logic_remap_actions.end());
+
+
+    printf("Total Number of actions %d\n", all_actions.size());
     
     // Sort by predicted improvement
     std::sort(all_actions.begin(), all_actions.end(),
@@ -244,52 +255,319 @@ std::vector<std::shared_ptr<EcoAction> > EcoRLEnvironment::getValidActions(const
       index2action_[index]=action;
       index++;
     }
-
     max_action_size_ = all_actions.size() > max_action_size_ ? all_actions.size():max_action_size_;
-    
     return all_actions;
 }
 
 
-  bool EcoRLEnvironment::IsShannonFeasible(const eco::PathInfo& path_info,
-					   odb::dbITerm* &start_iterm,
-					   odb::dbITerm* &end_iterm,
-					   unsigned N){
+  void EcoRLEnvironment::populateCompatibleSpareCells(odb::dbMaster* master_in,
+						      std::map<odb::dbMaster*,
+						      std::vector<std::shared_ptr<SpareCell>> >
+						      &master2candidates){
 
-    SpareCellsDictionary spare_cells_dictionary;
-    design_manager_ -> populateSpareCellsDictionary(spare_cells_dictionary);
+    std::set<std::string> compatible_masters = design_manager_ ->
+      getCompatibleMasters(master_in -> getName());
+
+    for (auto s: compatible_masters){
+
+      if (master2candidates.find(master_in) == master2candidates.end()){
+	std::vector<std::shared_ptr<SpareCell> > spare_vec;
+	
+	//checks that spares are not used.
+	std::vector<std::shared_ptr<SpareCell> > spare_cells =
+	  design_manager_ ->
+	  getAvailableSpares(s);
+
+	if (spare_cells.size() > 0){
+	  for (auto s: spare_cells){
+	    spare_vec.push_back(s);
+	  }
+	  master2candidates[master_in]=spare_vec;
+	}
+      }
+    }
+  }
+
+
+  /*
+    The Shannon gates to duplicate look something like:
+
+    INST{start_iterm} -> G1 -> G2 -> G3{end_iterm}
+
+    We do not copy INST. Instead we fish out its output (start_iterm) and use
+    that as the "cut point".
     
-    sta::dbSta* sta = ord::OpenRoad::openRoad()->getSta();
+  */
+  
+						      
+  bool EcoRLEnvironment::IsShannonFeasible(const eco::PathInfo& path_info,
+
+					   odb::dbITerm* &start_iterm, //an output pin. Drives first
+					   //gate in chain
+					   odb::dbITerm* &end_iterm,   //an output pin. Driven by
+					   //last gate in chain
+
+					   //
+					   //The gates in the chain to copy
+					   //Note we don't copy the one driving start_iterm.
+					   //That is our "cut point"
+					   //
+					   std::vector<std::pair<odb::dbInst*,
+					   std::shared_ptr<SpareCell> > >&
+					   gates_to_duplicate,
+					   int N //how deep our chain should be.
+					   ){
+
+    std::vector<std::map<odb::dbInst*, std::shared_ptr<SpareCell> > >   path_mapping;
+    
+    std::map<odb::dbMaster*, std::vector<std::shared_ptr<SpareCell> >  >    master2candidates;
+    std::vector<std::pair<int,int>> partitions;
+
+    std::vector<std::shared_ptr<SpareCell> > spare_cells_marked_as_used;
+    int start_ix = -1;
+    int end_ix = -1;
+    int max_partition_size = 0;
+    int partition_ix = 0;
+
+    path_mapping.resize(path_info.instances.size());
+    
+    /*
+    printf("Examining path:\n");
+    for (int inst_idx = 0; inst_idx < path_info.instances.size(); ++inst_idx) {
+      odb::dbInst* inst = path_info.instances[inst_idx];
+      printf("%s (%s) -> ",
+	     inst -> getName().c_str(),
+	     inst -> getMaster()-> getName().c_str());
+    }
+    printf("\n");
+    */
+    
+    //first populate the equivalent spare cells per master used in the path
 
     for (int inst_idx = 0; inst_idx < path_info.instances.size(); ++inst_idx) {
       odb::dbInst* inst = path_info.instances[inst_idx];
-      if (design_manager_ -> isFeasibleMaster(inst -> getMaster() -> getName(),
-					      spare_cells_dictionary)){
-	//	design_manager_ -> markUsed(inst -> getMaster() -> getName(),
-	//				    spare_cells_dictionary);
-	printf("%s -> ", inst -> getName().c_str());
+      odb::dbMaster* current_master = inst -> getMaster();
+
+      populateCompatibleSpareCells(current_master, master2candidates);
+      
+      std::vector<std::shared_ptr<SpareCell> > &candidates =
+	master2candidates[inst -> getMaster()];
+
+      long long  max_radius_squared = design_manager_ -> getMaxRadius(inst);
+      
+      // Get instance location (center point)      
+      int inst_x;
+      int inst_y;
+      inst->getLocation(inst_x, inst_y);
+      // Get instance bounding box to find center
+      odb::dbBox* bbox = inst->getBBox();
+      if (bbox) {
+        inst_x = (bbox->xMin() + bbox->xMax()) / 2;
+        inst_y = (bbox->yMin() + bbox->yMax()) / 2;
+      }
+      bool no_fit = true;
+      std::shared_ptr<SpareCell> candidate_spare_cell = nullptr;
+      if (candidates.size() != 0){
+	bool found_candidate =false;
+	for (auto s: candidates){
+	  if (s -> is_used == false){
+	    odb::dbInst* spare_inst = s -> instance;
+	    if (!spare_inst){
+	      continue;
+	    }
+	    int spare_x, spare_y;
+	    spare_inst->getLocation(spare_x, spare_y);
+	    // Get spare cell center
+	    odb::dbBox* spare_bbox = spare_inst->getBBox();
+	    if (spare_bbox) {
+	      spare_x = (spare_bbox->xMin() + spare_bbox->xMax()) / 2;
+	      spare_y = (spare_bbox->yMin() + spare_bbox->yMax()) / 2;
+	    }
+	    long long dx = static_cast<long long>(spare_x - inst_x);
+	    long long dy = static_cast<long long>(spare_y - inst_y);
+	    long long dist_squared = dx * dx + dy * dy;
+	    /*
+	    printf("Dist squared %ld Max Radius %ld Inst %s Spare Inst %s \n",
+		   dist_squared,
+		   max_radius_squared,
+		   inst -> getName().c_str(),
+		   spare_inst -> getName().c_str()
+		   );
+	    */
+	    if (dist_squared <= static_cast<long long>(max_radius_squared)) {
+	      s-> is_used= true;
+	      found_candidate = true;
+	      spare_cells_marked_as_used.push_back(s);
+	      if (start_ix == -1){
+		start_ix = inst_idx;
+	      }
+	      end_ix = inst_idx;
+	      path_mapping[partition_ix][inst] = s;
+	      no_fit = false;
+	      break; //found a mapping
+	    }
+	    else{
+	      //no fit
+	      continue;
+	    }
+	  }
+	}
+      }
+      
+      
+      if (no_fit){
+	//a break
+	//record non trivial partitions
+	if (start_ix != -1 && end_ix !=-1){
+	  partitions.push_back(std::pair<int,int>(start_ix,end_ix));
+	  max_partition_size = end_ix - start_ix;
+	  partition_ix++;
+
+	  {
+	    /*
+	    printf("Created partition:\n");
+	    for (int i= start_ix; i <= end_ix; i++){
+	      odb::dbInst* local_inst = path_info.instances[i];
+	      std::shared_ptr<SpareCell> local_spare =  path_mapping[partition_ix-1][local_inst];
+	      printf("Inst %s . Spare %s\n",
+		     local_inst -> getName().c_str(),
+		     local_spare ?
+		     local_spare ->  instance -> getName().c_str():
+		     "unknown-spare "
+		     );
+	      
+	    }
+	    */
+	  }
+	  
+	}
+	start_ix = -1;
+	end_ix = -1;
       }
     }
-    return false;
+
+    bool feasible_split = false;
+    partition_ix=0;
+    if (max_partition_size >= N) {
+      for (auto p: partitions){
+	if (p.second - p.first == max_partition_size){
+	  //start_iterm is output of first gate
+	  //construct the return gates
+	  /*  printf("First %d (%s) Last %d (%s)\n",
+		 p.first,
+		 path_info.instances[p.first] -> getName().c_str(),
+		 p.second,
+		 path_info.instances[p.second] -> getName().c_str()
+		 );
+	  */
+	  for (	  int local_ix = p.first;
+		  local_ix <= p.second;
+		  local_ix=local_ix+1){
+	    odb::dbInst* inst = path_info.instances[local_ix];
+
+
+	    if (local_ix == p.first){
+	      start_iterm = inst -> getFirstOutput();
+	      auto spare = path_mapping[partition_ix][inst];
+	      //we skip the first cell, we only use its output
+	      spare -> is_used = false;
+	    }
+	    
+	    if (local_ix == p.second){
+	      end_iterm = inst -> getFirstOutput();
+	    }
+	    std::shared_ptr<SpareCell> spare;
+	    if (path_mapping[partition_ix].find(inst) ==
+		path_mapping[partition_ix].end()){
+	      /*
+	      printf("Inst %s has no spare. local_ix %d\n",
+		     inst -> getName().c_str(),
+		     local_ix);	      
+	      */
+	    }
+
+	    //only copy the following cells.
+	    if (local_ix != p.first){
+	      spare = path_mapping[partition_ix][inst];
+	      assert(spare);
+	      gates_to_duplicate.push_back(
+					   std::pair<odb::dbInst*,
+					   std::shared_ptr<SpareCell> >(inst,spare)
+					   );
+	    }
+	  }
+	  feasible_split=true;
+	  break;
+	}
+	partition_ix++;
+      }
+    }
+    return feasible_split;
   }
+
+
   
 std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateShannonActions(
-						 const PathAnalysis& analysis) {
+					 const PathAnalysis& analysis)
+{
+  std::vector<std::shared_ptr<EcoAction>> actions;
+
+  
   for (int path_idx = 0; path_idx < analysis.critical_paths.size(); ++path_idx) {
         const auto& path = analysis.critical_paths[path_idx];
 	odb::dbITerm* start_iterm=nullptr;
 	odb::dbITerm* end_iterm=nullptr;
-	if (IsShannonFeasible(path,start_iterm, end_iterm,EcoRLEnvironment::SHANNON_DEPTH)){
-	  printf("Found shannon feasible split path\n");
-	  sta::dbSta* sta = ord::OpenRoad::openRoad()->getSta();
-		printf("Examining path %d:  slack %s ns\n",path.index,delayAsString(path.slack,sta));
-		for (int inst_idx = 0; inst_idx < path.instances.size(); ++inst_idx) {
-		  odb::dbInst* inst = path.instances[inst_idx];
-		  printf("%s -> ", inst -> getName().c_str());
-		}
-		printf("\n");
+	std::vector<std::pair<odb::dbInst*,std::shared_ptr<SpareCell>> > gates_to_duplicate;
+	odb::dbITerm* mux2xn_d0=nullptr;
+	odb::dbITerm* mux2xn_d1=nullptr;
+	odb::dbITerm* mux2xn_sel=nullptr;
+	odb::dbITerm* mux2xn_op=nullptr;
+	
+	std::shared_ptr<SpareCell> spare_mux_cell;	
+	if (design_manager_ -> getSpareMux2(spare_mux_cell,
+					    mux2xn_d0,
+					    mux2xn_d1,
+					    mux2xn_sel,
+					    mux2xn_op) &&
+	    IsShannonFeasible(path,
+			      start_iterm, //output pin of gate driving 1st member of chain
+			      end_iterm,   //output pin of last in chain
+			      gates_to_duplicate,
+			      EcoRLEnvironment::SHANNON_DEPTH)){
+
+	  EcoDesignManager::MoveResult result =
+	    design_manager_ -> previewPathSplit(
+						start_iterm,
+						end_iterm,
+						spare_mux_cell,
+						mux2xn_d0,
+						mux2xn_d1,
+						mux2xn_sel,
+						mux2xn_op,
+						gates_to_duplicate
+						);
+	  if (result.timing_improvement > 0) {
+	    
+	    auto action = std::make_shared<EcoAction>();
+	    action-> path_split = std::make_unique<PathSplitAction>();	  
+	    action -> type = EcoAction::ActionType::PATH_SPLIT;
+	    action -> path_split -> start_point = start_iterm;
+	    action -> path_split -> end_point = end_iterm;
+	    //deep copy
+	    action -> path_split -> gates_to_duplicate = gates_to_duplicate;
+	    action -> path_split -> shannon_depth = gates_to_duplicate.size();
+	    action-> path_split ->predicted_improvement = result.timing_improvement;
+	    action -> path_split -> spare_mux_cell = spare_mux_cell;
+	    action -> path_split -> mux2xn_d0 = mux2xn_d0;
+	    action -> path_split -> mux2xn_d1 = mux2xn_d1;
+	    action -> path_split -> mux2xn_sel = mux2xn_sel;
+	    action -> path_split -> mux2xn_op = mux2xn_op;	    
+	    
+	    actions.push_back(action);
+	  }
 	}
-  }  
+  }
+  return actions;
 }
 
   
@@ -300,8 +578,7 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateResizeActions(
   design_manager_ -> wireLengthCache(true);
   
   std::vector<std::shared_ptr<EcoAction>> actions;
-
-  std::map<std::string,std::set<std::string> > compatible_masters_set;
+  std::map<std::string,std::set<std::string> > compatible_masters_set; //shared across all runs
   std::map<std::string,std::set<std::string> > ::iterator  compatible_masters_set_it;
   std::set<std::string> compatible_masters;
     
@@ -310,16 +587,8 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateResizeActions(
     // For each critical path
     for (int path_idx = 0; path_idx < analysis.critical_paths.size(); ++path_idx) {
         const auto& path = analysis.critical_paths[path_idx];
-
 	sta::dbSta* sta = ord::OpenRoad::openRoad()->getSta();
-	/*
-		printf("Examining path %d:  slack %s ns\n",path.index,delayAsString(path.slack,sta));
-		for (int inst_idx = 0; inst_idx < path.instances.size(); ++inst_idx) {
-		  odb::dbInst* inst = path.instances[inst_idx];
-		  printf("%s -> ", inst -> getName().c_str());
-		}
-		printf("\n");
-	*/
+
         // For each instance in the path
         for (int inst_idx = 0; inst_idx < path.instances.size(); ++inst_idx) {
             odb::dbInst* inst = path.instances[inst_idx];
@@ -328,9 +597,7 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateResizeActions(
             std::string current_master_name = current_master->getName();
 	    double current_instance_area = design_manager_ -> getMasterArea(current_master_name);
             // Find nearby spare cells first
-	    
 	    long long  max_radius = design_manager_ -> getMaxRadius(inst);
-	    
 	    std::vector<std::shared_ptr<SpareCell>> nearby_spares = findNearbySpares(inst, max_radius);
 
 
@@ -345,14 +612,12 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateResizeActions(
 		design_manager_->getCompatibleMasters(current_master_name);
 	      compatible_masters =  compatible_masters_set[current_master_name];
 	    }
+
 	    
 	    auto end = std::chrono::steady_clock::now();
 	    std::chrono::duration<double,std::milli> duration = end-start;
-	    //	    printf("Time to get compatible masters %.10f ms\n",duration);
-
 
 	    for (auto spare_candidate: nearby_spares){
-
 	      //skip any spares we have already used.
 	      if (used_spare_cells.find(spare_candidate) != used_spare_cells.end()){
 		continue;
@@ -369,6 +634,7 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateResizeActions(
 
 	      //Is the candidate spare compatible with the master ?
 	      bool compatible = false;
+	      //	      printf("master for candidate spare %s\n", spare_master_name.c_str());
 	      if (compatible_masters.find(spare_master_name) !=
 		  compatible_masters.end()){
 		compatible = true;
@@ -393,7 +659,6 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateResizeActions(
 
 		auto end = std::chrono::steady_clock::now();
 		duration = end-start;
-
 
 	      // Only create action if there's predicted improvement
                 if (move_gain.timing_improvement > 0) {
@@ -435,12 +700,24 @@ double EcoRLEnvironment::estimateActionValue(const std::shared_ptr<EcoAction>& a
     double value = 0.0;
     
     switch (action->type) {
+      
     case EcoAction::ActionType::RESIZE: {
-            if (action->resize) {
-	      value = action -> predicted_improvement;
-            break;
-        }
-    }        
+      if (action->resize) {
+	value = action -> predicted_improvement;
+	printf("Estimate resize action value %.10f\n",value);		
+	break;
+      }
+    }
+      
+    case  EcoAction::ActionType::PATH_SPLIT: {
+      if (action -> path_split){
+	value = action -> predicted_improvement;
+	printf("Estimate path split action value %.10f\n",value);	
+	break;
+      }
+    }
+
+      
     case EcoAction::ActionType::REBUFFER: {
             if (action->rebuffer) {
                 // TODO: Estimate rebuffer value based on net length, criticality, etc.
@@ -484,13 +761,49 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateLoadSplitActio
     // TODO: Implement load split action generation
     return actions;
 }
- 
-std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateRetimeActions(
-    const PathAnalysis& analysis) {
+
+  
+  std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateRetimeActions(){
+
     std::vector<std::shared_ptr<EcoAction>> actions;
-    // TODO: Implement retime action generation
+
+    std::vector<std::tuple<odb::dbInst*,
+			   odb::dbITerm*, //d input
+			   odb::dbITerm*, //q output
+			   bool  //direction of the move
+			   //TODO: spare cells for the move.
+			   > > retime_moves;
+
+    design_manager_-> updateTiming(true); //do a full update timing
+    design_manager_ -> identifyRetimingMoves(retime_moves);
+    printf("Estimated number of retiming opportunities: %d\n", retime_moves.size());
+
+    //generate the eco actions for the each retiming move.
+    for (auto retime_move: retime_moves){
+      auto action = std::make_shared<EcoAction>();
+      action -> retime = std::make_unique<RetimeAction>();
+      action -> type = EcoAction::ActionType::RETIME;
+      odb::dbInst* flop_inst = std::get<0>(retime_move);
+      odb::dbITerm* d = std::get<1>(retime_move);
+      odb::dbITerm* q = std::get<2>(retime_move);
+      bool forward = std::get<3>(retime_move);
+
+      if (forward){
+	action -> retime -> operation = RetimeAction::RetimeOp::FORWARD_RETIME;
+      }
+      else{
+	action -> retime -> operation = RetimeAction::RetimeOp::BACKWARD_RETIME;	
+      }
+      action -> retime -> flop = flop_inst;
+      action -> retime -> d = d;
+      action -> retime -> q = q;
+
+      actions.push_back(action);
+    }
     return actions;
-}
+  }
+
+  
  
 std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generatePipelineActions(
     const PathAnalysis& analysis) {
@@ -566,6 +879,7 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateLogicRemapActi
     switch (action -> type){
     case EcoAction::ActionType::RESIZE:
       {
+	printf("Executing resize !\n");
 	std::string original_instance_name = action -> resize -> instance_name;
 	std::string spare_instance_name = action -> resize -> spare_instance;
 	odb::dbInst* original_instance = design_manager_ -> findInst(original_instance_name);
@@ -581,6 +895,29 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateLogicRemapActi
 						new_instance);
       }
       break;
+    case EcoAction::ActionType::PATH_SPLIT:
+      {
+	printf("Executing path split !\n");
+	odb::dbITerm* start = action -> path_split -> start_point;
+	odb::dbITerm* end = action -> path_split -> end_point;
+	std::shared_ptr<SpareCell> spare_mux_cell = action -> path_split -> spare_mux_cell;
+	odb::dbITerm* mux2xn_d0 = action -> path_split -> mux2xn_d0;
+	odb::dbITerm* mux2xn_d1 = action -> path_split -> mux2xn_d1;
+	odb::dbITerm* mux2xn_sel = action -> path_split -> mux2xn_sel;
+	odb::dbITerm* mux2xn_op=action -> path_split -> mux2xn_op;
+	std::vector<std::pair<odb::dbInst*,std::shared_ptr<SpareCell>> > gates_to_duplicate
+	  = action -> path_split -> gates_to_duplicate;
+	
+	return design_manager_ -> performPathSplit(start,
+						   end,
+						   spare_mux_cell,
+						   mux2xn_d0,
+						   mux2xn_d1,
+						   mux2xn_sel,
+						   mux2xn_op,
+						   gates_to_duplicate);
+      }
+      
     default:
       break;
     }
@@ -595,6 +932,11 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateLogicRemapActi
       //update the spare cell free list
       const std::shared_ptr<SpareCell> used_spare = action -> resize -> spare_candidate;
       all_states_used_spare_cells_.insert(used_spare);
+    }
+
+    if (action -> type == EcoAction::ActionType::PATH_SPLIT){
+      printf("Updated path split move !\n");
+      //update the spare cell free list
     }
 
     
@@ -714,6 +1056,39 @@ std::vector<double> EcoRLEnvironment::extractSpareUtilization() {
     case EcoAction::ActionType::RESIZE:
       strstr << "Resize. Instance " << resize -> instance_name << " New master " << resize -> new_master << "Spare instance " << resize -> spare_instance << " improvements " << resize -> predicted_improvement << "\n";
       return strstr.str();
+      break;
+      
+    case EcoAction::ActionType::PATH_SPLIT:
+      if (path_split -> start_point &&
+	  path_split -> end_point 
+	  ){
+      strstr << "Path Split cut point: " << path_split -> start_point -> getName('/') << " to  end point " << path_split -> end_point -> getName('/') << "\n";
+      strstr << "Estimated gain : " << path_split -> predicted_improvement << "\n";
+      strstr << "Path length: " << path_split -> shannon_depth << "\n";
+      strstr << "Instances in Shannon split path:\n";
+      for (auto p: path_split -> gates_to_duplicate){
+	if (p.first && p.second){
+	strstr << "\n Inst " << p.first -> getName() << "( " 
+	       << p.first -> getMaster() -> getName() << ")" 
+	       << "\tSpare " << p.second -> instance -> getName() 
+	       << "( " << p.second -> master -> getName() <<" )\n";
+	}
+	else {
+	  if (p.first == nullptr)
+	    printf("p.first null\n");
+	  if (p.second == nullptr)
+	    printf("p.second null\n");
+	  
+	  strstr << "Badly formed inst/spare combination\n";
+	}
+      }
+      strstr << "\n";
+      }
+      else{
+	strstr << "Badly formed path\n";
+      }
+      return strstr.str();
+      break;
     default:
       return std::string("Unsupported");
     }

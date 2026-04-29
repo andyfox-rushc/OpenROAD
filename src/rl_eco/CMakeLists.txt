@@ -10,6 +10,9 @@ swig_lib(NAME      rl_eco
 
 target_sources(rl_eco
   PRIVATE
+  src/EcoRLDbUtil.cpp
+  src/EcoRLRetime.cpp
+  src/EcoRLPathSplit.cpp
   src/EcoDesignManager.cpp
   src/EcoRLEnvironment.cpp
   src/EcoQLearningTrainer.cpp

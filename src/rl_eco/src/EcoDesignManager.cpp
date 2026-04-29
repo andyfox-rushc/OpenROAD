@@ -39,6 +39,7 @@ using namespace sta;
 using namespace grt;
 
 namespace eco {
+  
 EcoDesignManager::EcoDesignManager(dbDatabase* db,
 				   Sta* sta, 
 				   GlobalRouter* router,
@@ -58,6 +59,11 @@ EcoDesignManager::EcoDesignManager(dbDatabase* db,
     if (!dbsta_){
       throw std::runtime_error("No dbsta found in sta");
     }
+    dbnetwork_ = dbsta_ -> getDbNetwork();
+    if (!resizer_){
+      throw std::runtime_error("No dbnetwork found in sta");
+    }
+    
     // Initialize spare cell inventory
     identifySpareCells();
 
@@ -107,6 +113,7 @@ void EcoDesignManager::identifySpareCells() {
             }
             
             // Determine type based on master cell name
+	    // eg AND, INV, XOR etc
             spare -> type = getSpareType(spare -> master);
             
             if (!spare -> is_used) {
@@ -123,11 +130,37 @@ void EcoDesignManager::identifySpareCells() {
     }
 }
 
+
+  //
+  //A spare cell comes from either a dedicate eco cell
+  //or a cell we have freed up.
+  //
+
+  void EcoDesignManager::markInstFree(odb::dbInst* inst) {
+    free_set_.insert(inst);
+  }
+
+  void EcoDesignManager::removeFromFreeSet(odb::dbInst* inst){
+    free_set_.erase(inst);
+  }
+  
+  bool EcoDesignManager::freeInst(odb::dbInst* inst) const{
+    if (free_set_.find(inst) != free_set_.end()){
+      return true;
+    }
+    return false;
+  }
+
   
 
   
 bool EcoDesignManager::isSpareCell(dbInst* inst) const {
+
+  
     std::string inst_name = inst->getName();
+    if (freeInst(inst)){
+      return true;
+    }
     // Common patterns: SPARE_*, FILL_*, spare_*, eco_*
     return (inst_name.find("SPARE_") == 0 || 
             inst_name.find("FILL_") == 0 ||
@@ -137,6 +170,14 @@ bool EcoDesignManager::isSpareCell(dbInst* inst) const {
 }
 
   
+
+/* 
+   Todo:
+   Fix this ! It goes over the whole library for each candidate.
+   Build a-priori to avoid N**2.
+*/
+  
+
 std::set<std::string> EcoDesignManager::getCompatibleMasters(
     const std::string& master_name) const {
     
@@ -144,9 +185,8 @@ std::set<std::string> EcoDesignManager::getCompatibleMasters(
     
     // Extract the base cell type (remove drive strength suffix)
     std::string base_name = extractBaseName(master_name);
-    
+
     // Get all masters in the library
-    
     std::vector<dbMaster*> masters;
     block_ -> getMasters(masters);
     for (dbMaster* master : masters){
@@ -156,16 +196,17 @@ std::set<std::string> EcoDesignManager::getCompatibleMasters(
         if (candidate_name == master_name) {
             continue;
         }
-        
+
+	std::string candidate_base_name = extractBaseName(candidate_name);
+
         // Check if same base type
-        if (extractBaseName(candidate_name) == base_name) {
+        if (candidate_base_name == base_name) {
             // Verify same number of pins and pin compatibility
             if (arePinCompatible(master_name, candidate_name)) {
                 compatible_masters.insert(candidate_name);
             }
         }
     }
-    
     return compatible_masters;
 }
 
@@ -176,35 +217,6 @@ std::string EcoDesignManager::extractBaseName(const std::string& master_name) co
         return master_name.substr(0, pos);
     }
     return master_name;
-}
-
-bool EcoDesignManager::arePinCompatible(const std::string& master1_name, 
-                                        const std::string& master2_name) const {
-
-  dbMaster* master1 = db_->findMaster(master1_name.c_str());
-  dbMaster* master2 = db_->findMaster(master2_name.c_str());
-    
-  if (!master1 || !master2) {
-    return false;
-  }
-    
-    // Check same number of pins
-  if (master1->getMTermCount() != master2->getMTermCount()) {
-    return false;
-  }
-    
-    // Check pin names and directions match
-    std::map<std::string, dbSigType> pins1, pins2;
-    
-    for (dbMTerm* mterm : master1->getMTerms()) {
-        pins1[mterm->getName()] = mterm->getSigType();
-    }
-    
-    for (dbMTerm* mterm : master2->getMTerms()) {
-        pins2[mterm->getName()] = mterm->getSigType();
-    }
-    
-    return pins1 == pins2;
 }
 
   
@@ -221,10 +233,6 @@ std::string EcoDesignManager::getSpareType(dbMaster* master) const {
         return "BUF";
     } else if (master_name.find("INV") != std::string::npos) {
         return "INV";
-    } else if (master_name.find("AND") != std::string::npos) {
-        return "AND";
-    } else if (master_name.find("OR") != std::string::npos) {
-        return "OR";
     } else if (master_name.find("NAND") != std::string::npos) {
         return "NAND";
     } else if (master_name.find("NOR") != std::string::npos) {
@@ -233,36 +241,59 @@ std::string EcoDesignManager::getSpareType(dbMaster* master) const {
         return "XOR";
     } else if (master_name.find("MUX") != std::string::npos) {
         return "MUX";
+    } else if (master_name.find("AND") != std::string::npos) {
+        return "AND";
+    } else if (master_name.find("OR") != std::string::npos) {
+        return "OR";
     } else {
         return "GENERIC";
     }
 }
 
   void EcoDesignManager::populateSpareCellsDictionary(SpareCellsDictionary& spare_cells_dictionary){
+    
     printf("Todo: populate spare cells dictionary\n");
   }
 
   void EcoDesignManager::markUsed(const std::string& inst_name,
 				  SpareCellsDictionary& spare_cells_dictionary){
+    printf("Todo: markUsed\n");    
   }
-  bool EcoDesignManager::isFeasibleMaster(const std::string& name, SpareCellsDictionary& spare_cells_dictionary){
-    printf("Todo !\n");
+
+  
+  bool EcoDesignManager::isFeasibleMaster(const std::string& name,
+					  SpareCellsDictionary& spare_cells_dictionary){
+    printf("Todo: isFeasibleMaster\n");
     return false;
   }
 
   
-  std::vector<std::shared_ptr<SpareCell> > EcoDesignManager::getAvailableSpares(
-    const std::string& type) const {
+  std::vector<std::shared_ptr<SpareCell> > EcoDesignManager::getAvailableSpares(const std::string& t) const {
+
     std::vector<std::shared_ptr<SpareCell> > available;
     
     for (const auto& spare : spare_cells_) {
-        if (!spare -> is_used && (type.empty() || spare->type == type)) {
+      std::string spare_base_name =  extractBaseName(spare -> master -> getName());
+      std::string target_base_name = extractBaseName(t);
+      /*
+      printf("Spare cell type %s Target %s\n",
+	     spare_base_name.c_str(),
+	     target_base_name.c_str());
+      */
+      if ((!spare -> is_used) &&
+	  areCompatibleMasters(spare -> master -> getName(),
+			       t)){
             available.push_back(spare);
+	    /*
+	    printf("Found available spare (%s) for target (%s)!\n",
+		   spare -> master -> getName().c_str(),
+		   t.c_str()
+		   );
+	    */
         }
     }
-    
     return available;
-}
+  }
 
   
 SpareGateSummary EcoDesignManager::getSpareGateSummary() const {
@@ -379,7 +410,6 @@ std::vector<std::shared_ptr<SpareCell> > EcoDesignManager::findSpareCellsNear(
             continue;
         }
 	if (spare -> is_used){
-	  printf("Skipping used spare cell \n");
 	  continue;
 	}
         // Get spare cell location
@@ -529,6 +559,9 @@ EcoDesignManager::MoveResult EcoDesignManager::calculateMoveImpact(
 }
 
 
+
+  
+  
   /*
     Preview the resizing
   */
@@ -736,7 +769,7 @@ dbInst* EcoDesignManager::insertSpareCell(const std::string& spare_master_name,
     spare -> x = x;
     spare -> y = y;
     spare -> is_used = false;
-    spare -> type = getSpareType(master);
+    spare -> type = getSpareType(master); //class of type eg INV, AND, XOR
     
     spare_cells_.push_back(spare);
     // Update spare cells by type
@@ -1187,22 +1220,6 @@ EcoDesignManager::MoveResult EcoDesignManager::insertBuffer(
 }
 
   /* Helpers */
-
-  bool EcoDesignManager::areCompatibleMasters(const std::string& spare_master,
-					      const std::string& inst_master) const{
-    if (spare_master == inst_master){
-      return true;
-    }
-    std::string spare_base_name = extractBaseName(spare_master);
-    std::string inst_base_name = extractBaseName(inst_master);
-
-    if (spare_base_name == inst_base_name){
-      if (arePinCompatible(spare_base_name, inst_base_name)){
-	return true;
-      }
-    }
-    return false;
-  }
 
   
   
