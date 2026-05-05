@@ -21,23 +21,28 @@ namespace eco {
   //Is this a gate we can push a flop through ?
   //TODO: remove hardcoded names, look for logic.
   //
-  bool EcoDesignManager::RetimeableGate(odb::dbInst* inst) const{
+  bool EcoDesignManager::combinationalGate(odb::dbInst* inst) const{
     if (inst){
       odb::dbMaster* master = inst -> getMaster();
       std::string master_name = master -> getName();
       std::transform(master_name.begin(), master_name.end(), master_name.begin(), ::toupper);
-      
-          if (
-	      (master_name.find("BUF") != std::string::npos) ||
-	      (master_name.find("INV") != std::string::npos) ||
-	      (master_name.find("NAND") != std::string::npos)||
-	      (master_name.find("NOR") != std::string::npos) ||
-	      (master_name.find("XOR") != std::string::npos) ||
-	      (master_name.find("MUX") != std::string::npos) ||
-	      (master_name.find("AND") != std::string::npos) ||
-	      (master_name.find("OR") != std::string::npos)){
-	    return true;
-	  }
+
+      if (master_name.find("DFF") != std::string::npos){
+	return false;
+      }
+      if (
+	  (master_name.find("BUF") != std::string::npos) ||
+	  (master_name.find("INV") != std::string::npos) ||
+	  (master_name.find("NAND") != std::string::npos)||
+	  (master_name.find("NOR") != std::string::npos) ||
+	  (master_name.find("XOR") != std::string::npos) ||
+	  (master_name.find("MUX") != std::string::npos) ||
+	  (master_name.find("AND") != std::string::npos) ||
+	  (master_name.find("OAI") != std::string::npos) ||
+	  (master_name.find("AOI") != std::string::npos) ||	      	      
+	  (master_name.find("OR") != std::string::npos)){
+	return true;
+      }
     }
     return false;
     }
@@ -55,36 +60,37 @@ namespace eco {
 
   
 
-  bool EcoDesignManager::getFanin1Level(odb::dbITerm* ip_pin,
-					std::vector<odb::dbITerm*>& ip_pins){
+  bool EcoDesignManager::getFanin1LevelBackwardRetime(odb::dbITerm* ip_pin,
+						      std::vector<odb::dbITerm*>& ip_pins){
 
     int feasible_ip_pin_count=0;
     if (ip_pin){
-      odb::dbInst* cur_inst  = ip_pin -> getInst();
-
-      if (instConnectedToIos(cur_inst)){
-	return false;
-      }
-      
-      for (odb::dbITerm* cur_pin : cur_inst ->  getITerms()) {
-	odb::dbNet* ip_net = cur_pin -> getNet();
-	//cannot handle anything connected to a pad
-	if (ip_net -> getBTerms().size() >0){
-	  return false;
-	}
-	odb::dbObject* driver_object = ip_net -> getFirstDriverTerm();
-	if (driver_object ->getObjectType() == odb::dbITermObj){
-	  odb::dbITerm* driver_iterm = static_cast<odb::dbITerm*>(driver_object);
-	  odb::dbInst* driver_inst = driver_iterm -> getInst();
+      odb::dbInst* cur_inst = ip_pin -> getInst();
+      odb::dbNet* ip_net = ip_pin -> getNet();
+      odb::dbObject* driver_object = ip_net -> getFirstDriverTerm();
+      if (driver_object ->getObjectType() == odb::dbITermObj){
+	odb::dbITerm* driver_iterm = static_cast<odb::dbITerm*>(driver_object);
+	odb::dbInst* driver_inst = driver_iterm -> getInst();
 	  
 	  //we cannot handle cycles. instance looping back on itself..
 	  if (driver_inst == cur_inst){
+	    printf("Found a cycle ip pin %s/%s driver pin %s/%s, abort\n",
+		   ip_pin -> getInst() -> getName().c_str(),
+		   ip_pin -> getName().c_str(),
+		   driver_inst -> getName().c_str(),
+		   driver_iterm -> getName().c_str()
+		   
+		   );
 	    return false;
 	  }
-	  if (!RetimeableGate(driver_inst)){
+	  if (!combinationalGate(driver_inst)){
+	    printf("Not a retimeable gate %s of type %s, abort\n",
+		   driver_inst -> getName().c_str(),
+		   driver_inst -> getMaster() -> getName().c_str());
 	    return false;
 	  }
 	  if (instConnectedToIos(driver_inst)){
+	    printf("Driver instance connected to pad, abort\n");
 	    return false;
 	  }
 	  
@@ -96,16 +102,60 @@ namespace eco {
 	      }
 	    }
 	  }
-	}
+	  if (feasible_ip_pin_count >0){
+	    return true;
+	  }
       }
     }
-    if (feasible_ip_pin_count >0){
-      return true;
-    }
+    printf("Default: abort\n");
     return false;
   }
 
 
+  std::shared_ptr<SpareCell> EcoDesignManager::findClosestCompatibleSpare(odb::dbInst* i){
+    std::vector<std::shared_ptr<SpareCell> > compatible_spares;
+    if (getAvailableCompatibleSpares(i-> getMaster() -> getName(),compatible_spares)){
+      return findClosestSpare(i,compatible_spares);
+    }
+    return nullptr;
+  }
+
+  
+  std::shared_ptr<SpareCell> EcoDesignManager::findClosestSpare(odb::dbInst* i,
+								std::vector<std::shared_ptr<SpareCell> >& dff_spares){
+
+    if (dff_spares.size() >0 && i != nullptr){
+    int dist_from_x = 0;
+    int dist_from_y = 0;
+    int delta_squared = 0;
+    std::shared_ptr<SpareCell> closest_so_far=nullptr;
+    int best_delta_squared = -1;
+    
+    int i_x = 0;
+    int i_y = 0;
+    i -> getLocation(i_x,i_y);
+    closest_so_far = dff_spares[0];
+
+    if (dff_spares.size() > 1){
+      for (auto spare_dff: dff_spares){
+	int s_x = spare_dff -> x;
+	int s_y = spare_dff -> y;
+	int abs_x = abs(i_x - s_x);
+	int abs_y = abs(i_y - s_y);
+	delta_squared = abs_x*abs_y + abs_y*abs_y;
+	if (delta_squared <= best_delta_squared ||
+	    best_delta_squared == -1){
+	  closest_so_far = spare_dff;
+	  best_delta_squared = delta_squared;
+	}
+      }
+    }
+    return closest_so_far;
+    }
+    return nullptr;
+  }
+
+  
 
   bool EcoDesignManager::getFanout1Level(odb::dbITerm* op_pin,
 					 std::vector<odb::dbITerm*>& op_pins){
@@ -136,7 +186,7 @@ namespace eco {
 	      return false;
 	    }
 	    //avoid any gates we cannot push flops through
-	    if (!RetimeableGate(fanout_inst)){
+	    if (!combinationalGate(fanout_inst)){
 	      return false;
 	    }
 	    //avoid any gates connected to ios.
@@ -177,7 +227,7 @@ namespace eco {
     std::string spare_base_name = extractBaseName(spare_master); 
     std::string inst_base_name = extractBaseName(inst_master);
     if (spare_base_name == inst_base_name){
-      if (arePinCompatible(spare_base_name, inst_base_name)){
+      if (arePinCompatible(spare_master, inst_master)){
 	return true;
       }
     }
@@ -261,9 +311,9 @@ namespace eco {
 				      odb::dbITerm*& mux2xn_d1,
 				      odb::dbITerm*& mux2xn_sel,
 				      odb::dbITerm*& mux2xn_op){
-    
-    std::vector<std::shared_ptr<SpareCell> > spare_cells =
-      getAvailableSpares("MUX2_X2");
+
+    std::vector<std::shared_ptr<SpareCell> > spare_cells;
+    getAvailableCompatibleSpares("MUX2_X2",spare_cells);
 
     //
     //Mux equation (hardcoded!)
@@ -366,7 +416,128 @@ namespace eco {
     }
     return false;
   }
+
+
+  /*
+    Check if driver flop/fanout pair ok for forward retiming.
+
+    Axioms:
+    Must have singleton net from flop q to gate ip
+    All fanout ip pins must be driven by same type of flop
+    on same reset/set/clock domain.
+  */
   
+  bool EcoDesignManager::checkInstForwardRetime(
+						odb::dbInst* driver_flop,
+						odb::dbInst* fanout_inst){
+    if (driver_flop && fanout_inst){
+
+      if (!combinationalGate(fanout_inst)){
+	return false;
+      }
+
+      bool got_something = false; //handles case when we have no connections
+      
+      for (odb::dbITerm* cur_pin : fanout_inst ->  getITerms()) {
+	if (cur_pin -> isInputSignal(false)){
+	  odb::dbNet* cur_net = cur_pin -> getNet();
+	  if (!singletonNet(cur_net)){
+	    return false;
+	  }
+	  odb::dbObject* driver_object = cur_net -> getFirstDriverTerm();
+	  if (driver_object ->getObjectType() == odb::dbITermObj){
+	    odb::dbITerm* driver_iterm = static_cast<odb::dbITerm*>(driver_object);
+	    odb::dbInst* driver_inst = driver_iterm -> getInst();
+	    if (driver_inst == fanout_inst){
+	      return false;
+	    }
+	    if (instConnectedToIos(driver_inst)){
+	      return false;
+	    }
+	    
+	    //Make sure all inputs on fanout inst are driven by flops and
+	    //on same clock domain as original flop driver
+	    
+	    if (areCompatibleMasters(driver_inst -> getMaster() -> getName(),
+				     driver_flop -> getMaster() -> getName())){
+	      odb::dbITerm* orig_driver_inst_d;
+	      odb::dbITerm* fanin_driver_inst_d;
+	      odb::dbITerm* orig_driver_inst_q;
+	      odb::dbITerm* fanin_driver_inst_q;
+	      odb::dbITerm* orig_driver_inst_qn;
+	      odb::dbITerm* fanin_driver_inst_qn;
+	      odb::dbITerm* orig_driver_inst_clk;
+	      odb::dbITerm* fanin_driver_inst_clk;
+	      odb::dbITerm* orig_driver_inst_s;
+	      odb::dbITerm* fanin_driver_inst_s;
+	      odb::dbITerm* orig_driver_inst_r;
+	      odb::dbITerm* fanin_driver_inst_r;
+
+	      getFlopPins(driver_flop,
+			  orig_driver_inst_d,
+			  orig_driver_inst_q,
+			  orig_driver_inst_qn,
+			  orig_driver_inst_clk,
+			  orig_driver_inst_r,
+			  orig_driver_inst_s);
+
+
+	      getFlopPins(driver_inst,
+			  fanin_driver_inst_d,
+			  fanin_driver_inst_q,
+			  fanin_driver_inst_qn,
+			  fanin_driver_inst_clk,
+			  fanin_driver_inst_r,
+			  fanin_driver_inst_s);
+
+	      if (orig_driver_inst_clk && orig_driver_inst_clk -> getNet()){
+		if (!fanin_driver_inst_clk -> getNet()){
+		  return false;
+		}
+		if (fanin_driver_inst_clk -> getNet() !=
+		    orig_driver_inst_clk -> getNet())
+		  return false;
+	      }
+
+	      if (orig_driver_inst_r && orig_driver_inst_r -> getNet()){
+		if (!fanin_driver_inst_r -> getNet()){
+		  return false;
+		}
+		if (fanin_driver_inst_r -> getNet() !=
+		    orig_driver_inst_r -> getNet()){
+		  return false;
+		}
+	      }
+
+	      if (orig_driver_inst_s && orig_driver_inst_s -> getNet()){
+		if (!fanin_driver_inst_s -> getNet()){
+		  return false;
+		}
+		if (fanin_driver_inst_s -> getNet() !=
+		    orig_driver_inst_s -> getNet()){
+		  return false;
+		}
+	      }
+	      got_something = true;
+	    }
+	    else{
+	      return false;
+	    }
+	  }
+	  else {
+	    return false;
+	  }
+	}
+      }
+      if (got_something){
+	return true;
+      }
+    }
+    return false;
+  }
+
+  
+							   
   void EcoDesignManager::getFlopPins(odb::dbInst* flop,
 				     
 				     odb::dbITerm* &d_pin,
@@ -410,5 +581,14 @@ namespace eco {
     }
   }
 
+  void EcoDesignManager::getUnusedMatchingFlopSpares(odb::dbInst* flop,
+		     std::vector<std::shared_ptr<SpareCell> > &dff_spares){
+    //can be skipped
+    identifySpareCells();
+    std::string master_name = flop -> getMaster() -> getName();
+    //    printf("seeking spare flop with master %s\n", master_name.c_str());
+    getAvailableCompatibleSpares(master_name,dff_spares);
+    //    printf("# spares %d\n", dff_spares.size());
+  }
   
 }

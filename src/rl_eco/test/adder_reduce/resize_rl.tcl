@@ -1,6 +1,6 @@
 #!/usr/bin/env openroad
-cd ~/rl_test/adder_reduce
-source ~/OpenROAD_rl/src/rl_eco/src/RlEco.tcl
+source ../../src/RlEco.tcl
+
 info commands eco*
 puts "================================================"
 puts "Testing RL-based Resizer"
@@ -75,6 +75,7 @@ set model_file "$model_dir/eco_generation_model.ckpt"
 set episodes 20
 set learning_rate 0.001
 set epsilon 0.3      ;# exploration rate
+#set epsilon 1.0      ;# exploration rate
 set gamma 0.99       ;# discount factor
     
 puts "Training parameters:"

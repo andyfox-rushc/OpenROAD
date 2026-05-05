@@ -1,4 +1,4 @@
-cd ~/rl_test/adder_redce
+cd ~/rl_test/adder_reduce
 source ~/OpenROAD_rl/src/rl_eco/src/RlEco.tcl
 info commands eco*
 puts "================================================"
@@ -59,3 +59,7 @@ puts "\n=== Final Timing Analysis ==="
 estimate_parasitics -placement
 report_worst_slack -max
 report_worst_slack -min
+set final_wns [sta::worst_slack -max]
+set final_tns [sta::total_negative_slack -max]
+puts "Final WNS: ${final_wns}ns"
+puts "Final TNS: ${final_tns}ns"

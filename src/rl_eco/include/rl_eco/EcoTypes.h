@@ -25,8 +25,6 @@ namespace eco {
 // Spare cell tracking (not in standard OpenROAD)
 //
 
-
-  
   // Spare cell management
     struct SpareCell {
         odb::dbInst* instance;
@@ -151,10 +149,6 @@ inline odb::dbMaster* getCellMaster(odb::dbInst* inst) {
 }
 
 
-  typedef std::map<std::string,//instance name of spare cell
-		   std::vector<std::tuple <bool, std::shared_ptr<SpareCell> > > //used, reference to spare cell.
-		 > SpareCellsDictionary;
-  
     
 
   

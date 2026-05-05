@@ -27,7 +27,7 @@ Routines to perform retiming.
 
 #include "utl/Logger.h"
 
-
+#include "sta/VerilogWriter.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -39,6 +39,7 @@ Routines to perform retiming.
 #include <iostream>
 #include <sstream>
 
+//#define DEBUG_RETIME 
 using namespace odb;
 using namespace sta;
 
@@ -46,30 +47,139 @@ namespace eco {
 
   
 
-  EcoDesignManager::MoveResult EcoDesignManager::previewBackwardRetimingMove(
+  EcoDesignManager::MoveResult EcoDesignManager::previewBackwardRetimeMove(
 									     odb::dbInst* flop,
 									     odb::dbITerm* d,
 									     odb::dbITerm* q
 									     )
   {
     MoveResult result;
-    return result;
-    /*
-    std::vector<std::shared_ptr<SpareCell> > spares;
+    //get the matching spares
+    std::vector<std::shared_ptr<SpareCell> > dff_spares;
+    getUnusedMatchingFlopSpares(flop,dff_spares);
     
-    resizer_ -> journalBegin();
-    MoveResult result = performBackwardRetimeMove(flop,d,q,spares);
-    resizer_ -> journalEnd();
-    //free up the spares uses.
-    for (auto spare: spares){
-      spare -> is_used = false;
+#ifdef DEBUG_RETIME
+    printf("Backward retime for flop %s (type %s) d %s q%s\n",
+	   flop -> getName().c_str(),
+	   flop -> getMaster() -> getName().c_str(),
+	   d -> getMTerm() -> getName().c_str(),
+	   q -> getMTerm() -> getName().c_str());
+    odb::dbObject* driver_object = d -> getNet() -> getFirstDriverTerm();
+    if (driver_object && driver_object -> getObjectType() == odb::dbITermObj){
+      odb::dbITerm* driver_iterm = static_cast<odb::dbITerm*>(driver_object);
+      printf("D input driver %s/%s (on gate of type %s)\n",
+	     driver_iterm ->getInst() -> getName().c_str(),
+	     driver_iterm -> getMTerm() -> getName().c_str(),
+	     driver_iterm -> getInst() -> getMaster() -> getName().c_str());      
     }
+    else if (driver_object && driver_object -> getObjectType() == odb::dbBTermObj){
+      printf("D input driven by pad !\n");
+    }
+
+    printf("Flop %s Matches %d\n",
+	   flop -> getMaster() -> getName().c_str(),
+	   dff_spares.size());
+#endif
+    static int debug;
+    debug++;
+    std::vector<std::pair<odb::dbITerm*, std::shared_ptr<SpareCell> > > backward_retime_assignment;
+    //make a feasible retiming assignment, if possible
+    if (makeBackwardRetimeAssignment(flop,d,dff_spares,
+				     backward_retime_assignment)){
+#ifdef DEBUG_RETIME
+      printf("D %d Spare cell assignment for input flops\n",debug);
+      for (auto p: backward_retime_assignment){
+	printf("Fanin ip %s Instance %s (type %s)  Spare Cell Inst %s\n",
+	       p.first -> getMTerm() -> getName().c_str(),
+	       p.first -> getInst() -> getName().c_str(),
+	       p.first -> getInst() -> getMaster() -> getName().c_str(),	       
+	       p.second -> instance -> getName().c_str());
+	       
+      }
+#endif
+      
+      resizer_ -> journalBegin();
+      //measure retime move
+      result = performBackwardRetimeMove(flop,backward_retime_assignment);
+      resizer_ -> journalEnd();
+      //free up the spares uses.
+      for (auto retime_assignment: backward_retime_assignment){
+#ifdef DEBUG_RETIME
+	printf("Freeing up spare cell %s\n",
+	       retime_assignment.second -> instance -> getName().c_str());
+#endif	
+	retime_assignment.second -> is_used = false;
+      }
+      //return the timing numbers
+      return result;
+    }
+    result.error_message = "No feasible spare assignment";
+    result.timing_improvement = -0.1;
+    result.success = false;
     return result;
-    */
   }
   
   
+  bool EcoDesignManager::makeBackwardRetimeAssignment(odb::dbInst* dff,
+						      odb::dbITerm* d,
+						      std::vector<std::shared_ptr<SpareCell> >& dff_spares,
+						      std::vector<std::pair<odb::dbITerm*,
+						      std::shared_ptr<SpareCell> > >& backward_retime_assignment){
 
+    //get the fanin 1 level
+    //get unique fanin pins
+    //construct the iterm <-> spare cell correlation.
+
+    if (dff && d && d -> getNet()){
+      
+      std::vector<odb::dbITerm*> fanin_pins_to_retime;
+      if (getFanin1LevelBackwardRetime(d,fanin_pins_to_retime)){
+#ifdef DEBUG_RETIME
+      printf("MakeBackwardRetimeAssignment: pin %s #fanins %d\n",
+	     d -> getName().c_str(),
+	     fanin_pins_to_retime.size());
+#endif      
+      std::map<odb::dbNet*, std::vector<dbITerm*> > unique_net_drivers;
+      std::map<odb::dbNet*, std::vector<dbITerm*> >::iterator und_it;
+      for (auto fanin_pin: fanin_pins_to_retime){
+	odb::dbNet* fanin_pin_net = fanin_pin -> getNet();
+#ifdef DEBUG_RETIME
+	printf("Fanin inst %s pin %s to retime \n",
+	       fanin_pin -> getInst() -> getName().c_str(),
+	       fanin_pin -> getName().c_str())
+#endif	
+	und_it = unique_net_drivers.find(fanin_pin_net);
+	if (und_it != unique_net_drivers.end()){
+	  (*und_it).second.push_back(fanin_pin);
+	}
+	else{
+	  std::vector<dbITerm*> vec_drvr;
+	  vec_drvr.push_back(fanin_pin);
+	  unique_net_drivers[fanin_pin_net]=vec_drvr;
+	}
+      }
+      if (dff_spares.size() >= unique_net_drivers.size()){
+	for (auto und: unique_net_drivers){
+	  for (auto i: und.second){
+	    std::shared_ptr<SpareCell> dff_spare = findClosestSpare(i -> getInst(),
+								    dff_spares);
+	    std::pair<odb::dbITerm*, std::shared_ptr<SpareCell> >
+	      retime_assignment(i, dff_spare);
+	    dff_spare -> is_used=true;
+	    //note that two (or more) iterms might share the same spare cell.
+	    //This is to handle case of shared fanin drivers.
+	    backward_retime_assignment.push_back(retime_assignment);
+	  }
+	}
+	return true;
+      }
+      }
+    }
+    return false;
+  }
+
+  
+  
   
   bool EcoDesignManager:: identifyRetimingMoves(std::vector<std::tuple<odb::dbInst*,
 						odb::dbITerm*, //d input
@@ -84,7 +194,7 @@ namespace eco {
   //These are our candidates
 
   for (odb::dbInst* inst : block_->getInsts()) {
-    odb::dbMaster* master = inst -> getMaster();
+
     odb::dbITerm* d=nullptr;
     odb::dbITerm* q=nullptr;
     if (isDFFRS(inst,d,q)){
@@ -102,12 +212,17 @@ namespace eco {
       }
       sta::Unit *unit = Sta::sta()->units()->timeUnit();
       double d_slack_scaled = unit -> staToUser(d_slack);
-      double q_slack_scaled = unit -> staToUser(q_slack);       
+      double q_slack_scaled = unit -> staToUser(q_slack);
+#ifdef DEBUG_RETIME      
       printf("State %s D slack %.10f Q Slack %.10f\n",
 	     inst -> getName().c_str(),
 	     d_slack_scaled,
 	     q_slack_scaled);
-      
+      printf("TNS %.10f\n", initial_tns);
+#endif      
+      //
+      //TODO: sort retiming by gain
+      //
       if (d_slack_scaled > 0.0 && q_slack_scaled < 0.0){
 	//A forward move, push into fanout
 	candidates.push_back(std::tuple<odb::dbInst*, odb::dbITerm*, odb::dbITerm*, bool >
@@ -115,6 +230,17 @@ namespace eco {
       }
       else if (q_slack_scaled > 0.0 && d_slack_scaled < 0.0){
 	//A backward move, push into fanin
+#ifdef DEBUG_RETIME
+	printf("Backward move (Q=%s/%s D=%s/%s).  slack %.10f D slack %.10f\n",
+	       q -> getInst() -> getName().c_str(),
+	       q -> getName().c_str(),
+	       
+	       d -> getInst() -> getName().c_str(),
+	       d -> getName().c_str(),
+	       
+	       q_slack_scaled,
+	       d_slack_scaled);
+#endif	
 	candidates.push_back(std::tuple<odb::dbInst*, odb::dbITerm*, odb::dbITerm*, bool >
 			     (inst,d,q,false));
       }
@@ -141,18 +267,27 @@ namespace eco {
     return false;
   }
 
-  EcoDesignManager::MoveResult EcoDesignManager::performBackwardRetime(
+  EcoDesignManager::MoveResult EcoDesignManager::performBackwardRetimeMove(
 					       odb::dbInst* orig_flop,
 					       
 					       std::vector<std::pair<odb::dbITerm*,
 					       std::shared_ptr<SpareCell> > >
 					       &fanin_ip_pins //ok to have duplicate spare cells.
 					      ){
+#ifdef DEBUG_RETIME
+    const std::string before_move_verilog = "retimebefore.v";
+    sta::writeVerilog(before_move_verilog.c_str(), true, false, {},
+		      dbsta_ -> getDbNetwork());
+		      //sta_->network());    
+#endif    
     MoveResult     result;
     result.timing_improvement = 0.0;
 
-    double initial_tns, initial_area, initial_wire;    
-    capturePreMoveMetrics(initial_tns, initial_area, initial_wire);    
+    double initial_wns,initial_tns, initial_area, initial_wire;    
+    capturePreMoveMetrics(initial_wns,initial_tns, initial_area, initial_wire);
+
+    printf("backward retime: Initial tns %.10f\n", initial_tns);
+    
     std::map<odb::dbNet*,
 	     std::pair< std::vector<odb::dbITerm*>, //destination
 			std::shared_ptr<SpareCell> >
@@ -176,6 +311,20 @@ namespace eco {
       std::shared_ptr<SpareCell> spare_cell = fanin_ip_iter.second;
       odb::dbNet* ip_pin_net = ip_pin -> getNet();
       if (ip_pin_net){
+	int inst_x;
+	int inst_y;
+	ip_pin -> getInst() ->getLocation(inst_x, inst_y);
+	/*
+	printf("Ip pin %s location x=%d y= %d  spare cell inst %s cell %s location x=%d y=%d\n",
+	       ip_pin -> getMTerm() -> getName().c_str(),
+	       inst_x,
+	       inst_y,
+	       spare_cell -> instance -> getName().c_str(),
+	       spare_cell -> master -> getName().c_str(),
+	       spare_cell -> x,
+	       spare_cell -> y
+	       );
+	*/     
 	net2spare_it = net2spare.find(ip_pin_net);
 	if (net2spare_it != net2spare.end()){
 	  //multiple net-> pin case, stash additional ip_pin in vector
@@ -297,7 +446,17 @@ namespace eco {
     if (orig_flop_s && orig_flop_s_net){
       orig_flop_s -> disconnect();
     }
-    result = calculateMoveImpact(initial_tns, initial_area, initial_wire);
+    std::stringstream retime_move ;
+    retime_move << "Retime " << "Flop " << orig_flop->getName() << "."; 
+    result = calculateMoveImpact(initial_wns,initial_tns, initial_area, initial_wire,retime_move.str());
+
+
+#ifdef DEBUG_RETIME    
+    const std::string after_move_verilog = "retimeafter.v";
+    sta::writeVerilog(after_move_verilog.c_str(), true, false, {},
+		      dbsta_ -> getDbNetwork());
+		      //sta_->network());
+#endif    
     return result;
   }
   

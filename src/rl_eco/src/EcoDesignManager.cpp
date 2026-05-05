@@ -75,7 +75,10 @@ EcoDesignManager::~EcoDesignManager() {
 }
 
 
-  std::vector<std::shared_ptr<SpareCell> > EcoDesignManager::getSpareCells(){
+  std::vector<std::shared_ptr<SpareCell> > EcoDesignManager::getSpareCells(bool refresh){
+    if (refresh){
+      identifySpareCells();
+    }
     return spare_cells_;
   }
 
@@ -83,6 +86,8 @@ EcoDesignManager::~EcoDesignManager() {
   dbInst* EcoDesignManager::findInst(std::string& inst_name){
     return (block_ -> findInst(inst_name.c_str()));
   }
+
+
   
 void EcoDesignManager::identifySpareCells() {
     spare_cells_.clear();
@@ -122,12 +127,13 @@ void EcoDesignManager::identifySpareCells() {
             }
         }
     }
-    
+    /*
     std::cout << "Identified " << spare_cells_.size() << " available spare cells" << std::endl;
     // Print summary by type
     for (const auto& [type, cells] : spare_cells_by_type_) {
         std::cout << "  Type " << type << ": " << cells.size() << " cells" << std::endl;
     }
+    */
 }
 
 
@@ -172,9 +178,14 @@ bool EcoDesignManager::isSpareCell(dbInst* inst) const {
   
 
 /* 
-   Todo:
+   gets all the names of the masters which are compatible with this cell.
+   eg AND2_X1 is compatible with AND2_X2
+
+   To Do:
    Fix this ! It goes over the whole library for each candidate.
    Build a-priori to avoid N**2.
+
+   Use the cell dictionary.
 */
   
 
@@ -191,14 +202,7 @@ std::set<std::string> EcoDesignManager::getCompatibleMasters(
     block_ -> getMasters(masters);
     for (dbMaster* master : masters){
         std::string candidate_name = master->getName();
-        
-        // Skip if same as current
-        if (candidate_name == master_name) {
-            continue;
-        }
-
 	std::string candidate_base_name = extractBaseName(candidate_name);
-
         // Check if same base type
         if (candidate_base_name == base_name) {
             // Verify same number of pins and pin compatibility
@@ -210,6 +214,7 @@ std::set<std::string> EcoDesignManager::getCompatibleMasters(
     return compatible_masters;
 }
 
+  
 std::string EcoDesignManager::extractBaseName(const std::string& master_name) const {
     // Remove drive strength suffix (e.g., _X1, _X2, _X4, etc.)
     size_t pos = master_name.rfind("_X");
@@ -245,36 +250,23 @@ std::string EcoDesignManager::getSpareType(dbMaster* master) const {
         return "AND";
     } else if (master_name.find("OR") != std::string::npos) {
         return "OR";
+    } else if (master_name.find("DFFR") != std::string::npos) {
+        return "DFFR";
+    } else if (master_name.find("DFFS") != std::string::npos) {
+        return "DFFS";
+    } else if (master_name.find("DFF") != std::string::npos) {
+        return "DFF";
     } else {
         return "GENERIC";
     }
 }
 
-  void EcoDesignManager::populateSpareCellsDictionary(SpareCellsDictionary& spare_cells_dictionary){
-    
-    printf("Todo: populate spare cells dictionary\n");
-  }
-
-  void EcoDesignManager::markUsed(const std::string& inst_name,
-				  SpareCellsDictionary& spare_cells_dictionary){
-    printf("Todo: markUsed\n");    
-  }
-
   
-  bool EcoDesignManager::isFeasibleMaster(const std::string& name,
-					  SpareCellsDictionary& spare_cells_dictionary){
-    printf("Todo: isFeasibleMaster\n");
-    return false;
-  }
+  bool EcoDesignManager::getAvailableCompatibleSpares(const std::string& t,
+			      std::vector<std::shared_ptr<SpareCell> >& available) const {
 
-  
-  std::vector<std::shared_ptr<SpareCell> > EcoDesignManager::getAvailableSpares(const std::string& t) const {
-
-    std::vector<std::shared_ptr<SpareCell> > available;
-    
+    std::string target_base_name = extractBaseName(t);    
     for (const auto& spare : spare_cells_) {
-      std::string spare_base_name =  extractBaseName(spare -> master -> getName());
-      std::string target_base_name = extractBaseName(t);
       /*
       printf("Spare cell type %s Target %s\n",
 	     spare_base_name.c_str(),
@@ -292,7 +284,11 @@ std::string EcoDesignManager::getSpareType(dbMaster* master) const {
 	    */
         }
     }
-    return available;
+    if (available.size() == 0){
+      //      printf("Could not find any available spares for %s\n",t.c_str());
+      return false;
+    }
+    return true;
   }
 
   
@@ -524,7 +520,8 @@ std::vector<std::shared_ptr<SpareCell> > EcoDesignManager::findSpareCellsNear(
 }
 
 
-void EcoDesignManager::capturePreMoveMetrics(double& tns, double& area, double& wire_length) {
+  void EcoDesignManager::capturePreMoveMetrics(double& wns, double& tns, double& area, double& wire_length) {
+    wns = evaluateWorstNegativeSlack();    
     tns = evaluateTotalNegativeSlack();
     area = evaluateDesignArea();
     wire_length = evaluateTotalWireLength();
@@ -541,15 +538,30 @@ void EcoDesignManager::capturePreMoveMetrics(double& tns, double& area, double& 
 
   
 EcoDesignManager::MoveResult EcoDesignManager::calculateMoveImpact(
-    double pre_tns, double pre_area, double pre_wire) {
-    
+								   double pre_wns,
+								   double pre_tns,
+								   double pre_area,
+								   double pre_wire,
+								   std::string suffix) {
     MoveResult result;
+    double post_wns = evaluateWorstNegativeSlack();    
     double post_tns = evaluateTotalNegativeSlack();
+    (void)post_tns;
+    (void)post_wns;
+    
     double post_area = evaluateDesignArea();
     double post_wire = evaluateTotalWireLength() - deltaRemovedWires() +
       deltaAddedWires();
 
-    result.timing_improvement = post_tns - pre_tns;  // Positive is good
+    printf("calculateMoveImpact wns: post %.10f, pre: %.10f (%s)\n", post_wns,pre_wns,suffix.c_str());
+    printf("calculateMoveImpact tns: post %.10f, pre: %.10f (%s)\n", post_tns,pre_tns,suffix.c_str());    
+
+    result.timing_improvement = post_wns -pre_wns;
+    if (result.timing_improvement >= 0.0 || result.timing_improvement < 0.0000000001){
+      result.timing_improvement = post_tns - pre_tns;
+    }
+
+    //post_tns - pre_tns;  // Positive is good
 
 
     result.area_delta = post_area - pre_area;
@@ -574,7 +586,12 @@ EcoDesignManager::MoveResult EcoDesignManager::calculateMoveImpact(
     resizer_->journalBegin();
     
     MoveResult result = performInstanceSwap(inst, spare_inst);
-
+    printf("Impact of resizing %s (%s)-> %s (%s) move is %f\n",
+	   inst -> getName().c_str(),
+	   inst -> getMaster() -> getName().c_str(),
+	   spare_inst -> getName().c_str(),
+	   spare_inst -> getMaster() -> getName().c_str(),
+	   result.timing_improvement);
     //restore the journal
     resizer_->journalRestore();
 
@@ -595,8 +612,8 @@ EcoDesignManager::MoveResult EcoDesignManager::calculateMoveImpact(
 	   );
     */
     // Record initial metrics
-    double initial_tns, initial_area, initial_wire;
-    capturePreMoveMetrics(initial_tns, initial_area, initial_wire);
+    double initial_wns, initial_tns, initial_area, initial_wire;
+    capturePreMoveMetrics(initial_wns,initial_tns, initial_area, initial_wire);
 
 
     // Find the instance
@@ -657,7 +674,8 @@ EcoDesignManager::MoveResult EcoDesignManager::calculateMoveImpact(
     
     // Calculate impact
     auto move_impact_start = std::chrono::steady_clock::now();        
-    MoveResult result = calculateMoveImpact(initial_tns, initial_area, initial_wire);
+    MoveResult result = calculateMoveImpact(initial_wns,
+					    initial_tns, initial_area, initial_wire,"Resize");
     auto move_impact_end = std::chrono::steady_clock::now();
     std::chrono::duration<double,std::milli> move_impact_duration = move_impact_end - move_impact_start;
     //    printf("Time to perform move_impact %.10f ms\n",move_impact_duration.count());
@@ -670,8 +688,8 @@ EcoDesignManager::MoveResult EcoDesignManager::performResize(
 							     odb::dbInst* spare_inst){
     
     // Record initial metrics
-    double initial_tns, initial_area, initial_wire;
-    capturePreMoveMetrics(initial_tns, initial_area, initial_wire);
+  double initial_wns, initial_tns, initial_area, initial_wire;
+  capturePreMoveMetrics(initial_wns,initial_tns, initial_area, initial_wire);
     
     // Find the instance
     if (!inst) {
@@ -683,7 +701,7 @@ EcoDesignManager::MoveResult EcoDesignManager::performResize(
     sta_->updateTiming(false);
     
     // Calculate impact
-    MoveResult result = calculateMoveImpact(initial_tns, initial_area, initial_wire);
+    MoveResult result = calculateMoveImpact(initial_wns,initial_tns, initial_area, initial_wire,"Resize");
 
     return result;
 }
@@ -705,7 +723,6 @@ void EcoDesignManager::performSpareCellSwap(dbInst* target_inst,
     // Swap the spare cell master
     spare->instance->swapMaster(new_master);
     spare->is_used = true;
-    
     // Transfer connections
     for (const auto& [pin_name, net] : pin_connections) {
         dbITerm* spare_iterm = spare->instance->findITerm(pin_name.c_str());
@@ -713,7 +730,6 @@ void EcoDesignManager::performSpareCellSwap(dbInst* target_inst,
             spare_iterm->connect(net);
         }
     }
-    
     // Disconnect original instance
     for (dbITerm* iterm : target_inst->getITerms()) {
         iterm->disconnect();
@@ -1101,9 +1117,9 @@ double EcoDesignManager::evaluateTimingSlack(const std::string& pin_name) {
 
 double EcoDesignManager::evaluateTotalNegativeSlack() {
     // Use STA functionality to get TNS
-  //    sta_->ensureGraph();
-  //    sta_->searchPreamble();
-    sta_->updateTiming(false);    //incremental
+      sta_->ensureGraph();
+      sta_->searchPreamble();
+      sta_->updateTiming(/*false*/true);    //incremental
     double tns = sta_->totalNegativeSlack(sta_->cmdCorner(), sta::MinMax::max());
     sta::Unit *unit = Sta::sta()->units()->timeUnit();
     double tns_out = unit -> staToUser(tns); 
@@ -1114,6 +1130,7 @@ double EcoDesignManager::evaluateWorstNegativeSlack() {
   
     sta_->ensureGraph();
     sta_->searchPreamble();
+    sta_->updateTiming(/*false*/true);    //full
     Slack worst_slack;
     Vertex* worst_vertex;
     Sta::sta()->worstSlack(sta::MinMax::max(),worst_slack, worst_vertex);
@@ -1182,8 +1199,8 @@ EcoDesignManager::MoveResult EcoDesignManager::insertBuffer(
     int x, int y) {
     
     // Record initial metrics
-    double initial_tns, initial_area, initial_wire;
-    capturePreMoveMetrics(initial_tns, initial_area, initial_wire);
+  double initial_tns, initial_area, initial_wire, initial_wns;
+  capturePreMoveMetrics(initial_wns, initial_tns, initial_area, initial_wire);
     
     // Find the net
     dbNet* net = block_->findNet(net_name.c_str());
@@ -1214,7 +1231,7 @@ EcoDesignManager::MoveResult EcoDesignManager::insertBuffer(
     sta_->updateTiming(false);
     
     // Calculate impact
-    MoveResult result = calculateMoveImpact(initial_tns, initial_area, initial_wire);
+    MoveResult result = calculateMoveImpact(initial_wns,initial_tns, initial_area, initial_wire,"Rebuffer");
     
     return result;
 }

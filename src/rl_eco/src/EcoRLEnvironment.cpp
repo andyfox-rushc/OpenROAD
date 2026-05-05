@@ -207,18 +207,23 @@ std::vector<std::shared_ptr<EcoAction> > EcoRLEnvironment::getValidActions(const
   // Generate actions of each type  
   //  printf("Generating Shannon Actions\n");
   std::vector<std::shared_ptr<EcoAction> > shannon_actions = generateShannonActions(analysis);
-  
-  
+  printf("# %d shannon actions\n", shannon_actions.size());
 
+  
   start = std::chrono::steady_clock::now();    
   auto resize_actions = generateResizeActions(analysis);
   end = std::chrono::steady_clock::now();
   duration = end-start;
-
+  printf("# %d resize actions\n", resize_actions.size());
+  
 
     auto rebuffer_actions = generateRebufferActions(analysis);
     auto load_split_actions = generateLoadSplitActions(analysis);
+    
     auto retime_actions = generateRetimeActions();
+    printf("# %d retime actions\n", retime_actions.size());
+
+
     auto pipeline_actions = generatePipelineActions(analysis);
     auto logic_remap_actions = generateLogicRemapActions(analysis);
 
@@ -230,7 +235,7 @@ std::vector<std::shared_ptr<EcoAction> > EcoRLEnvironment::getValidActions(const
     all_actions.insert(all_actions.end(), resize_actions.begin(), resize_actions.end());
     all_actions.insert(all_actions.end(), rebuffer_actions.begin(), rebuffer_actions.end());
     all_actions.insert(all_actions.end(), load_split_actions.begin(), load_split_actions.end());
-    //    all_actions.insert(all_actions.end(), retime_actions.begin(), retime_actions.end());
+    all_actions.insert(all_actions.end(), retime_actions.begin(), retime_actions.end());
     all_actions.insert(all_actions.end(), pipeline_actions.begin(), pipeline_actions.end());
     all_actions.insert(all_actions.end(), logic_remap_actions.begin(), logic_remap_actions.end());
 
@@ -260,34 +265,30 @@ std::vector<std::shared_ptr<EcoAction> > EcoRLEnvironment::getValidActions(const
 }
 
 
+  
   void EcoRLEnvironment::populateCompatibleSpareCells(odb::dbMaster* master_in,
 						      std::map<odb::dbMaster*,
 						      std::vector<std::shared_ptr<SpareCell>> >
 						      &master2candidates){
-
-    std::set<std::string> compatible_masters = design_manager_ ->
-      getCompatibleMasters(master_in -> getName());
-
-    for (auto s: compatible_masters){
-
-      if (master2candidates.find(master_in) == master2candidates.end()){
-	std::vector<std::shared_ptr<SpareCell> > spare_vec;
-	
-	//checks that spares are not used.
-	std::vector<std::shared_ptr<SpareCell> > spare_cells =
-	  design_manager_ ->
-	  getAvailableSpares(s);
-
-	if (spare_cells.size() > 0){
-	  for (auto s: spare_cells){
-	    spare_vec.push_back(s);
-	  }
-	  master2candidates[master_in]=spare_vec;
+    std::vector<std::shared_ptr<SpareCell> > available_compatible_spares;
+    if (design_manager_ ->
+	getAvailableCompatibleSpares(master_in -> getName(), available_compatible_spares)){
+      master2candidates[master_in] = available_compatible_spares;
+      /*
+      if (available_compatible_spares.size() > 0){
+	for (auto s: available_compatible_spares){
+	  printf("%s (%s)\n",
+		 s -> instance -> getName().c_str(),
+		 s -> master -> getName().c_str());
 	}
       }
+      else{
+	printf("No compatibles found !\n");
+      }
+      */
     }
   }
-
+  
 
   /*
     The Shannon gates to duplicate look something like:
@@ -348,11 +349,14 @@ std::vector<std::shared_ptr<EcoAction> > EcoRLEnvironment::getValidActions(const
       odb::dbInst* inst = path_info.instances[inst_idx];
       odb::dbMaster* current_master = inst -> getMaster();
 
-      populateCompatibleSpareCells(current_master, master2candidates);
       
+      populateCompatibleSpareCells(current_master, master2candidates);
+
+      //prune the candidates
       std::vector<std::shared_ptr<SpareCell> > &candidates =
 	master2candidates[inst -> getMaster()];
 
+      //only examine those reachable.
       long long  max_radius_squared = design_manager_ -> getMaxRadius(inst);
       
       // Get instance location (center point)      
@@ -366,15 +370,17 @@ std::vector<std::shared_ptr<EcoAction> > EcoRLEnvironment::getValidActions(const
         inst_y = (bbox->yMin() + bbox->yMax()) / 2;
       }
       bool no_fit = true;
-      std::shared_ptr<SpareCell> candidate_spare_cell = nullptr;
-      if (candidates.size() != 0){
-	bool found_candidate =false;
-	for (auto s: candidates){
-	  if (s -> is_used == false){
-	    odb::dbInst* spare_inst = s -> instance;
-	    if (!spare_inst){
-	      continue;
-	    }
+
+      if (design_manager_ -> combinationalGate(inst)){
+	std::shared_ptr<SpareCell> candidate_spare_cell = nullptr;
+	if (candidates.size() != 0){
+	  bool found_candidate =false;
+	  for (auto s: candidates){
+	    if (s -> is_used == false){
+	      odb::dbInst* spare_inst = s -> instance;
+	      if (!spare_inst){
+		continue;
+	      }
 	    int spare_x, spare_y;
 	    spare_inst->getLocation(spare_x, spare_y);
 	    // Get spare cell center
@@ -408,12 +414,13 @@ std::vector<std::shared_ptr<EcoAction> > EcoRLEnvironment::getValidActions(const
 	    }
 	    else{
 	      //no fit
+	      printf("Skipping spare cell: out of radius: distance candidate miss!\n");
 	      continue;
 	    }
 	  }
 	}
+	}
       }
-      
       
       if (no_fit){
 	//a break
@@ -423,29 +430,33 @@ std::vector<std::shared_ptr<EcoAction> > EcoRLEnvironment::getValidActions(const
 	  max_partition_size = end_ix - start_ix;
 	  partition_ix++;
 
+	  /*
 	  {
-	    /*
+
 	    printf("Created partition:\n");
 	    for (int i= start_ix; i <= end_ix; i++){
 	      odb::dbInst* local_inst = path_info.instances[i];
 	      std::shared_ptr<SpareCell> local_spare =  path_mapping[partition_ix-1][local_inst];
-	      printf("Inst %s . Spare %s\n",
+	      printf("Inst %s (%s) . Spare %s\n",
 		     local_inst -> getName().c_str(),
+		     local_inst -> getMaster() -> getName().c_str(),
 		     local_spare ?
 		     local_spare ->  instance -> getName().c_str():
 		     "unknown-spare "
 		     );
 	      
 	    }
-	    */
 	  }
-	  
+	  */
+
 	}
 	start_ix = -1;
 	end_ix = -1;
       }
     }
 
+    //    printf("Max partition %d required min limit %d\n", max_partition_size,N);
+    
     bool feasible_split = false;
     partition_ix=0;
     if (max_partition_size >= N) {
@@ -502,6 +513,19 @@ std::vector<std::shared_ptr<EcoAction> > EcoRLEnvironment::getValidActions(const
 	partition_ix++;
       }
     }
+
+    /*
+    printf("Shannon split: this path is %s feasible\n",
+	   (!feasible_split)? "NOT" : " IS ");
+    for (int inst_idx = 0; inst_idx < path_info.instances.size(); ++inst_idx) {
+      odb::dbInst* inst = path_info.instances[inst_idx];
+      printf("%s (%s) -> ",
+	     inst -> getName().c_str(),
+	     inst -> getMaster()-> getName().c_str());
+    }
+    printf("\n");
+    */
+    
     return feasible_split;
   }
 
@@ -599,8 +623,6 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateResizeActions(
             // Find nearby spare cells first
 	    long long  max_radius = design_manager_ -> getMaxRadius(inst);
 	    std::vector<std::shared_ptr<SpareCell>> nearby_spares = findNearbySpares(inst, max_radius);
-
-
 	    auto start = std::chrono::steady_clock::now();
 
 	    compatible_masters_set_it = compatible_masters_set.find(current_master_name);
@@ -632,6 +654,11 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateResizeActions(
 	      odb::dbMaster* spare_master = spare_candidate -> master;
 	      std::string spare_master_name = spare_master -> getName();
 
+	      //don't swap for same type of cell.n
+	      if (spare_master_name ==
+		  current_master_name){
+		continue;
+	      }
 	      //Is the candidate spare compatible with the master ?
 	      bool compatible = false;
 	      //	      printf("master for candidate spare %s\n", spare_master_name.c_str());
@@ -771,34 +798,50 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateLoadSplitActio
 			   odb::dbITerm*, //d input
 			   odb::dbITerm*, //q output
 			   bool  //direction of the move
-			   //TODO: spare cells for the move.
 			   > > retime_moves;
 
     design_manager_-> updateTiming(true); //do a full update timing
     design_manager_ -> identifyRetimingMoves(retime_moves);
-    printf("Estimated number of retiming opportunities: %d\n", retime_moves.size());
+    //    printf("Estimated number of retiming opportunities: %u\n", retime_moves.size());
 
+    //sort retiming moves based on gain
+    
     //generate the eco actions for the each retiming move.
     for (auto retime_move: retime_moves){
-      auto action = std::make_shared<EcoAction>();
-      action -> retime = std::make_unique<RetimeAction>();
-      action -> type = EcoAction::ActionType::RETIME;
+      //preview the retime move.
+      //If gain, make the action.
       odb::dbInst* flop_inst = std::get<0>(retime_move);
       odb::dbITerm* d = std::get<1>(retime_move);
       odb::dbITerm* q = std::get<2>(retime_move);
       bool forward = std::get<3>(retime_move);
 
-      if (forward){
-	action -> retime -> operation = RetimeAction::RetimeOp::FORWARD_RETIME;
-      }
-      else{
-	action -> retime -> operation = RetimeAction::RetimeOp::BACKWARD_RETIME;	
-      }
-      action -> retime -> flop = flop_inst;
-      action -> retime -> d = d;
-      action -> retime -> q = q;
+      if (forward == false){
+	EcoDesignManager::MoveResult moveresult = design_manager_ ->
+	  previewBackwardRetimeMove(
+				    flop_inst,
+				    d,
+				    q);
+	//only make moves for things that help
+	if (moveresult.success &&
+	    moveresult.timing_improvement > 0.0){
+	  printf("Preview revealed timing improvement of %.10f\n", moveresult.timing_improvement);
+	  
+	  auto action = std::make_shared<EcoAction>();
+	  action -> retime = std::make_unique<RetimeAction>();
+	  action -> type = EcoAction::ActionType::RETIME;
 
-      actions.push_back(action);
+	  if (forward){
+	    action -> retime -> operation = RetimeAction::RetimeOp::FORWARD_RETIME;
+	  }
+	  else{
+	    action -> retime -> operation = RetimeAction::RetimeOp::BACKWARD_RETIME;	
+	  }
+	  action -> retime -> flop = flop_inst;
+	  action -> retime -> d = d;
+	  action -> retime -> q = q;
+	  actions.push_back(action);
+	}
+      }
     }
     return actions;
   }
@@ -879,7 +922,7 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateLogicRemapActi
     switch (action -> type){
     case EcoAction::ActionType::RESIZE:
       {
-	printf("Executing resize !\n");
+	//	printf("Executing resize !\n");
 	std::string original_instance_name = action -> resize -> instance_name;
 	std::string spare_instance_name = action -> resize -> spare_instance;
 	odb::dbInst* original_instance = design_manager_ -> findInst(original_instance_name);
@@ -897,7 +940,7 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateLogicRemapActi
       break;
     case EcoAction::ActionType::PATH_SPLIT:
       {
-	printf("Executing path split !\n");
+	//	printf("Executing path split !\n");
 	odb::dbITerm* start = action -> path_split -> start_point;
 	odb::dbITerm* end = action -> path_split -> end_point;
 	std::shared_ptr<SpareCell> spare_mux_cell = action -> path_split -> spare_mux_cell;
@@ -917,7 +960,27 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateLogicRemapActi
 						   mux2xn_op,
 						   gates_to_duplicate);
       }
-      
+      break;
+    case EcoAction::ActionType::RETIME:
+      {
+	//	printf("Executing retime move !\n");
+	odb::dbInst* flop = action -> retime -> flop;
+	odb::dbITerm* d = action -> retime -> d;
+	odb::dbITerm* q = action -> retime -> q;
+	if (action -> retime -> operation == RetimeAction::RetimeOp::BACKWARD_RETIME){
+	  std::vector<std::shared_ptr<SpareCell> > dff_spares;
+	  design_manager_ -> getUnusedMatchingFlopSpares(flop,dff_spares);
+	  std::vector<std::pair<odb::dbITerm*, std::shared_ptr<SpareCell> > > backward_retime_assignment;
+    //make a feasible retiming assignment, if possible
+	  if (design_manager_ -> makeBackwardRetimeAssignment(flop,d,dff_spares,
+					   backward_retime_assignment)){
+	    return design_manager_ -> performBackwardRetimeMove(flop,backward_retime_assignment);
+
+	  }
+	}
+      }
+    break;
+    
     default:
       break;
     }
@@ -935,10 +998,17 @@ std::vector<std::shared_ptr<EcoAction>> EcoRLEnvironment::generateLogicRemapActi
     }
 
     if (action -> type == EcoAction::ActionType::PATH_SPLIT){
-      printf("Updated path split move !\n");
+      //      printf("Updated path split move !\n");
+      //TODO
       //update the spare cell free list
+
     }
 
+    if (action -> type == EcoAction::ActionType::RETIME){
+      //TODO
+      //printf("Accepted retime move\n");
+      ;
+    }
     
   
     resizer_->journalEnd();
@@ -1037,11 +1107,12 @@ std::vector<double> EcoRLEnvironment::extractSpareUtilization() {
     }
     
     vec.insert(vec.end(), recent_improvements.begin(), recent_improvements.end());
-    printf("History features\n");
+    //    printf("History features\n");
+    /*
     printf("Moves attempted %f Moves accepted %f\n",
 	   moves_attempted,
 	   moves_accepted);
-	   
+    */	   
     vec.push_back(static_cast<double>(moves_attempted));
     vec.push_back(static_cast<double>(moves_accepted));
 
@@ -1089,10 +1160,34 @@ std::vector<double> EcoRLEnvironment::extractSpareUtilization() {
       }
       return strstr.str();
       break;
+
+    case EcoAction::ActionType::RETIME:
+      {
+	strstr << "Retime " << ( (retime -> operation == RetimeAction::RetimeOp::FORWARD_RETIME) ? " Forward " : " Backward ") << "Flop " << retime -> d -> getInst() -> getName() << "\n";
+      }
+      return strstr.str();      
+      break;
     default:
       return std::string("Unsupported");
     }
   }
-
   
-} // namespace eco
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

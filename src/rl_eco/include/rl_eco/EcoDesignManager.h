@@ -91,6 +91,7 @@ public:
   bool isDFFRS(odb::dbInst* db_inst,
 	       odb::dbITerm* &d_in,
 	       odb::dbITerm* &q_out);
+
   
   odb::dbITerm* getPinByMTermName(odb::dbInst*, const std::string& pin_name);
   bool getSpareMux2(
@@ -100,9 +101,13 @@ public:
 		    odb::dbITerm*& mux2xn_sel,
 		    odb::dbITerm*& mux2xn_op);
 
-  bool RetimeableGate(odb::dbInst* inst) const;
+  bool checkInstForwardRetime(odb::dbInst* driver_flop, odb::dbInst* fanout_inst);
+  bool combinationalGate(odb::dbInst* inst) const;
   bool instConnectedToIos(odb::dbInst* inst) const;
-  bool getFanin1Level(odb::dbITerm* ip_pin, std::vector<odb::dbITerm*>& ip_pins);
+  std::shared_ptr<SpareCell> findClosestCompatibleSpare(odb::dbInst* i);
+  std::shared_ptr<SpareCell> findClosestSpare(odb::dbInst* i,
+					      std::vector<std::shared_ptr<SpareCell> >& dff_spares);
+  bool getFanin1LevelBackwardRetime(odb::dbITerm* ip_pin, std::vector<odb::dbITerm*>& ip_pins);
   bool getFanout1Level(odb::dbITerm* op_pin, std::vector<odb::dbITerm*>& op_pins);
   void updateTiming(bool full);
   bool areCompatibleMasters(const std::string& spare_master, const std::string& inst_master) const;
@@ -173,17 +178,26 @@ public:
 			    &fanout_op_pins
 			    );
 
-  MoveResult previewBackwardRetimingMove(odb::dbInst* flop,
+  
+  MoveResult previewBackwardRetimeMove(odb::dbInst* flop,
 					 odb::dbITerm* d,
 					 odb::dbITerm* q);
 
+  bool makeBackwardRetimeAssignment(odb::dbInst* dff,
+				    odb::dbITerm* d,
+				    std::vector<std::shared_ptr<SpareCell> >& dff_spares,				    
+				    std::vector<std::pair<odb::dbITerm*,
+				    std::shared_ptr<SpareCell> > >& backward_retime_assignment);
   
-  MoveResult performBackwardRetime(
+  MoveResult performBackwardRetimeMove(
 			     odb::dbInst* orig_flop,
 			     std::vector<std::pair<odb::dbITerm*,
 			     std::shared_ptr<SpareCell> > >
 			     &fanin_ip_pins
 			     );
+
+  void getUnusedMatchingFlopSpares(odb::dbInst* flop,
+				   std::vector<std::shared_ptr<SpareCell> > &dff_spares);
   
   bool identifyRetimingMoves(std::vector<
 			     std::tuple<
@@ -239,8 +253,12 @@ public:
   void identifySpareCells();
   void reportSpareCells();  
   SpareGateSummary getSpareGateSummary() const;
-  std::vector<std::shared_ptr<SpareCell> > getSpareCells();  
-  std::vector<std::shared_ptr<SpareCell> > getAvailableSpares(const std::string& type = "") const;
+  std::vector<std::shared_ptr<SpareCell> > getSpareCells(bool refresh=false);
+
+  
+  bool getAvailableCompatibleSpares(const std::string& t,
+	    std::vector<std::shared_ptr<SpareCell> > &available_compatible_spares) const;
+  
   std::shared_ptr<SpareCell> findNearestSpare(int x, int y, const std::string& type);
   std::vector<std::shared_ptr<SpareCell> > findSpareCellsNear(//pass in cells used in prior states here
 							      odb::dbInst* instance,
@@ -276,9 +294,6 @@ public:
   //get the logger
   utl::Logger* logger() {return logger_;}
   
-  bool isFeasibleMaster(const std::string& name, SpareCellsDictionary& spare_cells_dictionary);
-  void markUsed(const std::string& name, SpareCellsDictionary& spare_cells_dictionary);
-  void populateSpareCellsDictionary(SpareCellsDictionary& spare_cells_dictionary);
   void wireLengthCache(bool value){use_wire_length_cache_=value;}
 
 private:
@@ -296,17 +311,17 @@ private:
   std::map<std::string, odb::dbNet*> pin2net_;
   std::unordered_set<odb::dbInst*> free_set_;
   
-  
   // Spare cell tracking
   std::vector<std::shared_ptr<SpareCell> > spare_cells_;
+  //Base name to spare cells.
   std::unordered_map<std::string, std::vector<std::shared_ptr<SpareCell>>> spare_cells_by_type_;
 
   // Checkpoints
   std::unordered_map<std::string, std::pair<double, double>> checkpoints_;
     
   // Helper methods
-  void capturePreMoveMetrics(double& tns, double& area, double& wire_length);
-  MoveResult calculateMoveImpact(double pre_tns, double pre_area, double pre_wire);
+  void capturePreMoveMetrics(double& wns, double& tns, double& area, double& wire_length);
+  MoveResult calculateMoveImpact(double pre_wns, double pre_tns, double pre_area, double pre_wire,std::string suffix="");
   bool isSpareCell(odb::dbInst* inst) const;
   std::string getSpareType(odb::dbMaster* master) const;
   void performSpareCellSwap(odb::dbInst* target_inst, std::shared_ptr<SpareCell> spare, odb::dbMaster* new_master);

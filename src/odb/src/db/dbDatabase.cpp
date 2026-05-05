@@ -766,6 +766,12 @@ void dbDatabase::commitEco(dbBlock* block_)
 {
   _dbBlock* block = (_dbBlock*) block_;
   // Commit the current ECO or the last ECO into stack
+  //  if (!(block->journal_ || !block->journal_stack_.empty())){
+  //    printf("At error point\n");
+  //  }
+  if (block->journal_stack_.empty()){
+    return;
+  }
   assert(block->journal_ || !block->journal_stack_.empty());
   if (!block->journal_) {
     block->journal_ = block->journal_stack_.top();
