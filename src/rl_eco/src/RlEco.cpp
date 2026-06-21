@@ -80,7 +80,6 @@ void RlEco::init(OpenRoad* openroad)
         return;
     }
     
-    
     // Log some basic design statistics
     if (design_manager_ && block) {
         logger_->info(utl::ECO, 3, "Design: {}", block->getName());

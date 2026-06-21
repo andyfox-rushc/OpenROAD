@@ -53,15 +53,12 @@ DQNAgent::DQNAgent(size_t state_size, size_t action_size, const QLearningConfig&
                              bool training) {
     // In inference mode, always exploit (no exploration)
     if (inference_mode_i || (!training && std::rand() / double(RAND_MAX) >= epsilon_)) {
-        // Fast path for inference - direct forward pass
-      //if (inference_mode_i){
-      //	printf("Inference mode chosing best\n");
-      //      }
-      //      printf("Forward pass for select action -- choosing best!\n");
+      // Fast path for inference - direct forward pass
       //
       //The q values come from the weights learned during training.
       //
-        auto q_values = q_network_->forward(state);
+      std::vector<double> state_copy = state;
+        auto q_values = q_network_->forward(state_copy);
         // Find the best valid action
         double max_q = -std::numeric_limits<double>::infinity();
         size_t best_action = valid_actions[0];
@@ -110,7 +107,8 @@ double DQNAgent::train() {
     for (const auto& exp : batch) {
       // Compute current Q-value
       // This is Q(s,a) - our current estimate, not the "true" value
-      auto current_q_values = q_network_->forward(exp.state);
+      std::vector<double> state_mutable = exp.state;
+      std::vector<double> current_q_values = q_network_->forward(state_mutable);
 
       // 2. BOOTSTRAP TARGET CALCULATION
       // Compute target Q-value
@@ -120,10 +118,11 @@ double DQNAgent::train() {
             target_q_value = exp.reward;
         } else {
 	  // Non-terminal: bootstrap using our ESTIMATE of future value
-	  auto next_q_values = target_network_->forward(exp.next_state);
+	  std::vector<double> muteable_values = exp.next_state;
+	  auto next_q_values = target_network_->forward(muteable_values);
             if (config_.use_double_dqn) {
                 // Double DQN: use online network to select action, target network to evaluate
-                auto next_q_values_online = q_network_->forward(exp.next_state);
+                auto next_q_values_online = q_network_->forward(next_q_values);
                 size_t best_action = std::distance(
                     next_q_values_online.begin(),
                     std::max_element(next_q_values_online.begin(), next_q_values_online.end())
@@ -147,7 +146,8 @@ double DQNAgent::train() {
         
         // Train network
 	// Neural network does: Q(s,a) += learning_rate * (target - Q(s,a))
-	q_network_->train(exp.state, target, config_.learning_rate);
+	std::vector<double> muteable_values = exp.next_state;
+	q_network_->train(muteable_values, target, config_.learning_rate);
         
         // Calculate loss for statistics
         double loss = q_network_->computeLoss(current_q_values, target);
@@ -187,7 +187,8 @@ void DQNAgent::copyNetworkWeights(NeuralNetwork* from, NeuralNetwork* to) {
 }
 
 std::vector<double> DQNAgent::computeQValues(const std::vector<double>& state) {
-    return q_network_->forward(state);
+  std::vector<double> copy_of_state = state;
+    return q_network_->forward(copy_of_state);
 }
 
 void DQNAgent::saveModel(const std::string& filename) const {

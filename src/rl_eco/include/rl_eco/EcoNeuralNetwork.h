@@ -31,7 +31,7 @@ public:
   void setWeights(const std::vector<std::vector<double>>& weights) { weights_ = weights; }
   void setBiases(const std::vector<double>& biases) { biases_ = biases; }
   
-    std::vector<double> forward(const std::vector<double>& input);
+    std::vector<double> forward(std::vector<double>& input);
     std::vector<double> backward(const std::vector<double>& grad_output, 
                                 double learning_rate);
     
@@ -78,14 +78,14 @@ public:
     NeuralNetwork& operator=(NeuralNetwork&&) = default;
     
     // Forward pass
-    std::vector<double> forward(const std::vector<double>& input);
+    std::vector<double> forward(std::vector<double>& input);
     
     // Backward pass (returns input gradients)
     std::vector<double> backward(const std::vector<double>& grad_output, 
                                 double learning_rate);
     
     // Training utilities
-    void train(const std::vector<double>& input,
+    void train(std::vector<double>& input,
               const std::vector<double>& target,
               double learning_rate);
     

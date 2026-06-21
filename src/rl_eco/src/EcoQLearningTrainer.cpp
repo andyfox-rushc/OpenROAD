@@ -55,16 +55,15 @@ EcoQLearningTrainer::EcoQLearningTrainer(std::shared_ptr<EcoDesignManager> manag
   rsz::Resizer* resizer = ord::OpenRoad::openRoad() -> getResizer();
   
   env_ = std::make_unique<EcoRLEnvironment>(manager, resizer);
-    
-    // Create agent
-    size_t state_size = env_->getStateSize();
-    size_t action_size = env_->getActionSize();
-    //Note that until we start training we don't have any actions
-    //so we default the action size
-    if (action_size == 0){
-      action_size = config.default_action_size;
-    }
-    agent_ = std::make_unique<DQNAgent>(state_size, action_size, config);
+  // Create agent
+  size_t state_size = env_->getStateSize();
+  size_t action_size = env_->getActionSize();
+  //Note that until we start training we don't have any actions
+  //so we default the action size
+  if (action_size == 0){
+    action_size = config.default_action_size;
+  }
+  agent_ = std::make_unique<DQNAgent>(state_size, action_size, config);
 }
 
 void EcoQLearningTrainer::train(size_t num_episodes) {
@@ -83,7 +82,7 @@ void EcoQLearningTrainer::train(size_t num_episodes) {
 	//        if (episode % 10 == 0) {
             printTrainingProgress(episode);
 	    //        }
-        
+       
         // Save checkpoint
         if (episode % 100 == 0 && episode > 0) {
             std::string checkpoint_file = "checkpoint_episode_" + 

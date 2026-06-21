@@ -559,6 +559,7 @@ EcoDesignManager::MoveResult EcoDesignManager::calculateMoveImpact(
     result.timing_improvement = post_wns -pre_wns;
     if (result.timing_improvement >= 0.0 || result.timing_improvement < 0.0000000001){
       result.timing_improvement = post_tns - pre_tns;
+      printf("Gain: %.10f\n",result.timing_improvement);
     }
 
     //post_tns - pre_tns;  // Positive is good

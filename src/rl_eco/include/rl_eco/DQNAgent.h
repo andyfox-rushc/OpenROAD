@@ -57,7 +57,8 @@ public:
 
   //debug
   std::vector<double> getQValues(const std::vector<double>& state) {
-    auto q_values = q_network_->forward(state);
+    std::vector<double> state_copy = state;
+    auto q_values = q_network_->forward(state_copy);
     return q_values;
   }
     // Core methods

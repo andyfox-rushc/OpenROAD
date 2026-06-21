@@ -61,7 +61,8 @@ eco::IntVector_push $vec 256
 
 $eco setHiddenLayers $vec
 
-$eco setBatchSize 32
+#$eco setBatchSize 32
+$eco setBatchSize 2
 $eco setReplayBufferSize 10000
 $eco setRewardWeights 1.0 0.3 0.2
 
@@ -72,7 +73,7 @@ set model_file "$model_dir/eco_generation_model.ckpt"
     
 # Train the RL agent
 #episodes was 200
-set episodes 20
+set episodes 1
 set learning_rate 0.001
 set epsilon 0.3      ;# exploration rate
 #set epsilon 1.0      ;# exploration rate
