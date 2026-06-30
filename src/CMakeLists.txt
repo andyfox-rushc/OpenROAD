@@ -145,6 +145,13 @@ if (NOT ALLOW_WARNINGS)
   )
 endif()
 
+
+
+find_package(Torch REQUIRED)
+if (TORCH_FOUND)
+  message(STATUS "LibTorch found: ${TORCH_VERSION} ${TORCH_LIBRARIES} ${TORCH_INCLUDE_DIRS} ")
+endif()
+
 add_compile_options(
   -Wall
   -Wmissing-field-initializers
@@ -297,7 +304,7 @@ set_target_properties(openroad PROPERTIES
 
 target_compile_options(openroad
   PRIVATE
-    -Wextra -pedantic -Wcast-qual
+    -Wextra -pedantic -Wcast-qual -fvisibility=hidden
 )
 
 # Needed for boost stacktrace
@@ -316,7 +323,7 @@ target_compile_features(openroad PUBLIC cxx_std_20)
 
 target_include_directories(openroad
   PUBLIC
-    ../include
+  ../include
 )
 
 target_link_libraries(openroad
@@ -363,6 +370,7 @@ target_link_libraries(openroad
   ${TCL_LIBRARY}
   ${CMAKE_THREAD_LIBS_INIT}
   ${Boost_LIBRARIES}
+  ${TORCH_LIBRARIES}  
 )
 
 target_compile_definitions(openroad PRIVATE BUILD_TYPE="${CMAKE_BUILD_TYPE}")

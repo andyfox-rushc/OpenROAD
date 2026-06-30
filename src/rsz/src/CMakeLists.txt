@@ -3,6 +3,10 @@
 
 include("openroad")
 
+find_package(Torch REQUIRED)
+message(STATUS "Found Torch: ${TORCH_LIBRARIES}")
+
+
 swig_lib(NAME      rsz
          NAMESPACE rsz
          I_FILE    Resizer.i
@@ -79,8 +83,10 @@ target_sources(rsz
 
 target_include_directories(rsz
   PUBLIC
-    ../include
+     ../include
+     ${TORCH_INCLUDE_DIRS}
   PRIVATE
+     ${TORCH_INCLUDE_DIRS}
     # A side-effect of including OpenSTA swig files
     ${OPENSTA_HOME}
     ${OPENSTA_HOME}/include/sta
@@ -90,8 +96,10 @@ target_include_directories(rsz
 
 target_include_directories(rsz_lib
   PUBLIC
-    ../include
+     ../include
+      ${TORCH_INCLUDE_DIRS}
   PRIVATE
+    ${TORCH_INCLUDE_DIRS}    
     .
     move
     policy
@@ -99,6 +107,11 @@ target_include_directories(rsz_lib
 
 target_link_libraries(rsz_lib
   PUBLIC
+    ${TORCH_LIBRARIES}
+    torch
+    torch_cpu
+    c10
+    
     est_lib
     stt_lib
     odb

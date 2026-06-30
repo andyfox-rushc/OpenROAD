@@ -57,6 +57,9 @@
 #include "utl/Logger.h"
 #include "utl/mem_stats.h"
 #include "utl/scope.h"
+#include "/home/afox/libtorch/include/torch/csrc/api/include/torch/torch.h"
+//#include <torch/torch.h>
+#include <torch/script.h>
 
 namespace rsz {
 
@@ -72,8 +75,10 @@ RepairDesign::RepairDesign(Resizer* resizer) : resizer_(resizer)
 
 RepairDesign::~RepairDesign() = default;
 
+  
 void RepairDesign::init()
 {
+
   logger_ = resizer_->logger_;
   dbStaState::init(resizer_->sta_);
   db_network_ = resizer_->db_network_;
@@ -2430,4 +2435,11 @@ float RepairDesign::getSlewRCFactor()
   return *slew_rc_factor_;
 }
 
+
 }  // namespace rsz
+void testTorchIntegration(){
+  torch::Tensor tensor = torch::rand({2,3});
+  std::cout << "Pytorch test tensor:\n" << tensor << std::endl;
+  torch::Tensor result = torch::matmul(tensor,tensor.transpose(0,1));
+  std::cout << "Result of matmul:\n" << result << std::endl;
+}

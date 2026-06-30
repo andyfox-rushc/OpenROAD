@@ -94,7 +94,7 @@
 #include "utl/decode.h"
 #include "web/MakeWeb.h"
 #include "web/web.h"
-
+//void testTorchIntegration();
 namespace ord {
 extern const char* ord_tcl_inits[];
 }  // namespace ord
@@ -197,6 +197,8 @@ void initOpenRoad(Tcl_Interp* interp,
       interp, log_filename, metrics_filename, batch_mode);
 }
 
+  
+  
 void OpenRoad::init(Tcl_Interp* tcl_interp,
                     const char* log_filename,
                     const char* metrics_filename,
@@ -315,7 +317,8 @@ void OpenRoad::init(Tcl_Interp* tcl_interp,
   dft::initDft(tcl_interp);
   est::initTcl(tcl_interp);
   web::initWeb(tcl_interp);
-
+  //  testTorchIntegration();
+  
   // Import exported commands to global namespace.
   Tcl_Eval(tcl_interp, "sta::define_sta_cmds");
   Tcl_Eval(tcl_interp, "namespace import sta::*");
